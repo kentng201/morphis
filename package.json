@@ -1,0 +1,27 @@
+{
+    "name": "morphis",
+    "version": "0.1.0",
+    "author": "Kent Ng <kent.ng201@gmail.com>",
+    "main": "src/index.ts",
+    "bin": {
+        "morphis": "./scripts/index.ts"
+    },
+    "files": [
+        "scripts/",
+        "src/"
+    ],
+    "devDependencies": {
+        "@types/bun": "latest",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.9.3"
+    },
+    "description": "Morphis is a modern, opinionated web framework designed for developers who love the elegant patterns of Laravel but crave the speed of the Bun runtime. It brings a full-stack, \"batteries-included\" architecture to the TypeScript ecosystem, optimized for both monolithic and microservice deployments",
+    "keywords": [],
+    "license": "MIT",
+    "scripts": {
+        "morphis": "bun scripts/index.ts"
+    },
+    "dependencies": {
+        "chalk": "^5.6.2"
+    }
+}

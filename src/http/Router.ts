@@ -1,0 +1,270 @@
+import { HttpMethod, Request, RawRequest } from './types';
+import { HttpMethodMiddleware, ValidateMiddleware, EndpointMiddleware } from './decorators';
+import { TransformerMiddleware } from '../middlewares/TransformerMiddleware';
+import { Middleware } from './Middleware';
+import { runWithContext } from './Context';
+import { ROUTE_KEY } from './metadata';
+
+interface RouteEntry {
+    method: HttpMethod;
+    path: string;
+    pattern: RegExp;
+    paramNames: string[];
+    handler: (req: Request) => unknown;
+    action: string;
+    middlewares: string[];
+}
+
+/** Map from resource method name → HTTP verb + path suffix */
+const RESOURCE_MAP: Array<{ name: string; method: HttpMethod; suffix: string }> = [
+    { name: 'list', method: 'GET', suffix: '' },
+    { name: 'get', method: 'GET', suffix: '/:id' },
+    { name: 'create', method: 'POST', suffix: '' },
+    { name: 'update', method: 'PUT', suffix: '/:id' },
+    { name: 'delete', method: 'DELETE', suffix: '/:id' },
+];
+
+function buildPattern(path: string): { pattern: RegExp; paramNames: string[] } {
+    const paramNames: string[] = [];
+    const regexStr = path
+        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // escape special chars
+        .replace(/:(\w+)/g, (_, name) => {
+            paramNames.push(name);
+            return '([^/]+)';
+        });
+    return { pattern: new RegExp(`^${regexStr}$`), paramNames };
+}
+
+function resolveRouteKey(fn: Function): { method: HttpMethod; path: string } | null {
+    const meta = (fn as any)[ROUTE_KEY];
+    if (!meta) return null;
+    return meta;
+}
+
+export class Router {
+    private routes: RouteEntry[] = [];
+    private globalMiddlewares: Middleware[] = [];
+
+    /**
+     * Register a global middleware that wraps every request.
+     * Middlewares are applied in the order they are added (outermost first).
+     *
+     * @example
+     * router.use(new TrackMiddleware());
+     */
+    use(middleware: Middleware | Middleware[]): this {
+        if (Array.isArray(middleware)) {
+            this.globalMiddlewares.push(...middleware);
+        } else {
+            this.globalMiddlewares.push(middleware);
+        }
+        return this;
+    }
+
+    private addRoute(method: HttpMethod, path: string, handler: (req: Request) => unknown, action: string, middlewares: string[] = []): this {
+        const { pattern, paramNames } = buildPattern(path);
+        this.routes.push({ method, path, pattern, paramNames, handler, action, middlewares });
+        return this;
+    }
+
+    /** Returns all registered routes for inspection (e.g. listRoutes script). */
+    getRoutes(): Array<{ method: HttpMethod; path: string; action: string; middlewares: string[] }> {
+        return this.routes.map(r => ({ method: r.method, path: r.path, action: r.action, middlewares: r.middlewares }));
+    }
+
+    /** Returns the names of all global middlewares registered via use(). */
+    getGlobalMiddlewares(): string[] {
+        return this.globalMiddlewares.map(m => m.constructor.name);
+    }
+
+    /**
+     * Wraps a handler with any ValidateMiddleware instances in the array.
+     * Uses the middleware's own handler() so there is a single source of truth.
+     */
+    private applyValidateMiddlewares(
+        handler: (req: Request) => unknown,
+        middlewares: EndpointMiddleware[],
+    ): (req: Request) => unknown {
+        // Walk in reverse so the first validate() in the array is outermost.
+        const validates = middlewares.filter((m): m is ValidateMiddleware => (m as any)._kind === 'validate');
+        return validates.reduceRight(
+            (next, mw) => (req: Request) => mw.handler(req, next as (req: Request) => Promise<unknown>) as Promise<unknown>,
+            handler,
+        );
+    }
+
+    /**
+     * Wraps a handler with any TransformerMiddleware instances in the array.
+     * Transforms are applied after validation (validate wraps transform wraps handler).
+     */
+    private applyTransformMiddlewares(
+        handler: (req: Request) => unknown,
+        middlewares: EndpointMiddleware[],
+    ): (req: Request) => unknown {
+        const transforms = middlewares.filter((m): m is TransformerMiddleware => (m as any)._kind === 'transform');
+        return transforms.reduceRight(
+            (next, mw) => (req: Request) => mw.handler(req, next as (req: Request) => Promise<unknown>) as Promise<unknown>,
+            handler,
+        );
+    }
+
+    /** Collect middleware names for route inspection (excludes the method middleware). */
+    private collectMiddlewareNames(middlewares: EndpointMiddleware[]): string[] {
+        return middlewares
+            .filter((m): m is ValidateMiddleware | TransformerMiddleware =>
+                (m as any)._kind === 'validate' || (m as any)._kind === 'transform',
+            )
+            .map(m => m.constructor.name);
+    }
+
+    /**
+     * Register an inline handler with a middleware array.
+     * The array must contain at least one method middleware (e.g. get('/path'))
+     * and can contain any number of validate() middlewares.
+     *
+     * @example
+     * router.endpoint(function rootIndex() { return { ok: true }; }, [
+     *   Get('/'),
+     *   Validate({ headers: AuthValidator }),
+     * ]);
+     */
+    endpoint(handler: (req: Request) => unknown, middlewares: EndpointMiddleware[]): this {
+        const methodMw = middlewares.find((m): m is HttpMethodMiddleware => (m as any)._kind === 'method');
+        if (!methodMw) return this;
+        const transformWrapped = this.applyTransformMiddlewares(handler, middlewares);
+        const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
+        const action = handler.name.replace(/^bound\s+/, '') || '<anonymous>';
+        const mwNames = this.collectMiddlewareNames(middlewares);
+        return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames);
+    }
+
+    /** Register a controller method, or an inline handler with options.middlewares. */
+    get(fn: (req: Request) => unknown, middlewares?: EndpointMiddleware[]): this { return this.registerFn('GET', fn, middlewares); }
+    post(fn: (req: Request) => unknown, middlewares?: EndpointMiddleware[]): this { return this.registerFn('POST', fn, middlewares); }
+    put(fn: (req: Request) => unknown, middlewares?: EndpointMiddleware[]): this { return this.registerFn('PUT', fn, middlewares); }
+    delete(fn: (req: Request) => unknown, middlewares?: EndpointMiddleware[]): this { return this.registerFn('DELETE', fn, middlewares); }
+    patch(fn: (req: Request) => unknown, middlewares?: EndpointMiddleware[]): this { return this.registerFn('PATCH', fn, middlewares); }
+
+    private registerFn(expectedMethod: HttpMethod, fn: (req: Request) => unknown, middlewares?: EndpointMiddleware[]): this {
+        if (middlewares) {
+            // Path and method come from the HttpMethodMiddleware inside the array
+            const methodMw = middlewares.find((m): m is HttpMethodMiddleware => (m as any)._kind === 'method');
+            if (!methodMw) return this;
+            const transformWrapped = this.applyTransformMiddlewares(fn, middlewares);
+            const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
+            const action = fn.name.replace(/^bound\s+/, '') || '<anonymous>';
+            const mwNames = this.collectMiddlewareNames(middlewares);
+            return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames);
+        }
+        const meta = resolveRouteKey(fn) as any;
+        if (!meta) {
+            // No metadata and no options — custom handler with no path, skip registration
+            return this;
+        }
+        const action = meta.controllerName
+            ? `${meta.controllerName[0].toLowerCase()}${meta.controllerName.slice(1)}.${meta.handlerKey}`
+            : fn.name.replace(/^bound\s+/, '') || '<anonymous>';
+        return this.addRoute(meta.method, meta.path, fn, action);
+    }
+
+    /**
+     * Auto-registers all matching resource methods on the controller instance:
+     *   list   → GET    /base
+     *   get    → GET    /base/:id
+     *   create → POST   /base
+     *   update → PUT    /base/:id
+     *   delete → DELETE /base/:id
+     */
+    resources(instance: object): this {
+        for (const { name, method, suffix } of RESOURCE_MAP) {
+            const fn = (instance as any)[name];
+            if (typeof fn !== 'function') continue;
+            const meta = resolveRouteKey(fn);
+            if (!meta) continue;
+
+            // Derive the base path from the metadata (strip trailing /:id if present),
+            // then append the canonical suffix instead.
+            const base = meta.path.replace(/\/:[^/]+$/, '');
+            const fullPath = base + suffix || '/';
+            const controllerName = (meta as any).controllerName;
+            const action = controllerName
+                ? `${controllerName[0].toLowerCase()}${controllerName.slice(1)}.${name}`
+                : name;
+            this.addRoute(method, fullPath, fn as (req: Request) => unknown, action);
+        }
+        return this;
+    }
+
+    /** Main request handler — pass to Bun.serve({ fetch }) */
+    async handle(rawReq: RawRequest): Promise<globalThis.Response> {
+        return runWithContext(async () => {
+            const url = new URL(rawReq.url);
+            const pathname = url.pathname;
+            const method = rawReq.method as HttpMethod;
+
+            // OPTIONS preflight — pass through global middlewares (e.g. CorsMiddleware
+            // will intercept and return 204 before reaching the route handler).
+            if (method === 'OPTIONS') {
+                const preflightReq: Request = {
+                    raw: rawReq,
+                    path: pathname,
+                    headers: rawReq.headers,
+                    params: {},
+                    query: Object.fromEntries(url.searchParams),
+                    body: undefined,
+                };
+                const noopHandler = () => Promise.resolve(new Response(null, { status: 204 }));
+                const chain = this.globalMiddlewares.reduceRight(
+                    (next, mw) => (req: Request) => mw.handler(req, next),
+                    noopHandler as (req: Request) => Promise<unknown>,
+                );
+                const result = await chain(preflightReq);
+                if (result instanceof Response) return result;
+                return new Response(null, { status: 204 });
+            }
+
+            for (const route of this.routes) {
+                if (route.method !== method) continue;
+                const match = pathname.match(route.pattern);
+                if (!match) continue;
+
+                const params: Record<string, string> = {};
+                route.paramNames.forEach((name, i) => {
+                    params[name] = decodeURIComponent(match[i + 1]);
+                });
+
+                const parsedBody = ['POST', 'PUT', 'PATCH'].includes(method)
+                    ? await rawReq.json().catch(() => undefined)
+                    : undefined;
+
+                const appReq: Request = {
+                    raw: rawReq,
+                    path: pathname,
+                    headers: rawReq.headers,
+                    params,
+                    query: Object.fromEntries(url.searchParams),
+                    body: parsedBody,
+                };
+
+                try {
+                    // Compose global middlewares around the matched route handler.
+                    // The last global middleware calls the route handler as `next`.
+                    const routeHandler = (req: Request) => Promise.resolve(route.handler(req));
+                    const chain = this.globalMiddlewares.reduceRight(
+                        (next, mw) => (req: Request) => mw.handler(req, next),
+                        routeHandler as (req: Request) => Promise<unknown>,
+                    );
+
+                    const result = await chain(appReq);
+                    if (result instanceof Response) return result;
+                    return Response.json(result, { status: 200 });
+                } catch (err) {
+                    console.error('[Router] Handler error:', err);
+                    return Response.json({ error: 'Internal server error' }, { status: 500 });
+                }
+            }
+
+            return Response.json({ error: 'Not found' }, { status: 404 });
+        });
+    }
+}
