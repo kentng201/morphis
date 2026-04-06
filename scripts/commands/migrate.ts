@@ -62,10 +62,11 @@ export async function runMigrate(rest: string[]) {
         process.exit(1);
     }
 
-    // ── Verify migrations folder exists ──────────────────────────────────────
-    const migrationsDir = path.join(cwd, 'migrations');
+    // ── Verify migrations/<connection>/ folder exists ───────────────────────
+    const connectionFolder = config.name as string;
+    const migrationsDir = path.join(cwd, 'migrations', connectionFolder);
     if (!fs.existsSync(migrationsDir)) {
-        console.error(chalk.red('\n  migrations/ folder not found. Run: morphis new:migration <name>\n'));
+        console.error(chalk.red(`\n  migrations/${connectionFolder}/ folder not found. Run: morphis new:migration <name> --connection=${connectionFolder}\n`));
         process.exit(1);
     }
 

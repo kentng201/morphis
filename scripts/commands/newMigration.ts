@@ -76,17 +76,19 @@ export async function runNewMigration(rest: string[]) {
         process.exit(1);
     }
 
-    // ── Create migrations/ and the empty .sql file ────────────────────────────
-    const migrationsDir = path.join(cwd, 'migrations');
+    // ── Create migrations/<connection>/ and the empty .sql file ───────────────
+    const connectionFolder = config.name as string;
+    const migrationsDir = path.join(cwd, 'migrations', connectionFolder);
     fs.mkdirSync(migrationsDir, { recursive: true });
 
     const filename = `${formatTimestamp(new Date())}-${migrationName}.sql`;
     fs.writeFileSync(path.join(migrationsDir, filename), '');
 
+    const relPath = `migrations/${connectionFolder}/${filename}`;
     console.log();
-    console.log(chalk.gray(`    create migrations/${filename}`));
+    console.log(chalk.gray(`    create ${relPath}`));
     console.log();
-    console.log(chalk.bold('  Migration created: ') + chalk.cyan(`migrations/${filename}`));
+    console.log(chalk.bold('  Migration created: ') + chalk.cyan(relPath));
     console.log(chalk.gray(`  Run ${chalk.cyan('morphis migrate')} to apply it.`));
     console.log();
 }
