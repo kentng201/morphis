@@ -18,6 +18,8 @@ import { runNewConnection } from './commands/newConnection';
 import { runMigrate } from './commands/migrate';
 import { runNewMigration } from './commands/newMigration';
 import { runNewModel } from './commands/newModel';
+import { runNewController } from './commands/newController';
+import { runNewValidator } from './commands/newValidator';
 import { runNewServer } from './commands/newServer';
 
 // ---------------------------------------------------------------------------
@@ -175,6 +177,24 @@ const commands: Record<string, CommandDef> = {
         },
     },
 
+    // ── New controller scaffold ───────────────────────────────────────────────
+    'new:controller': {
+        description: 'Scaffold a resource Controller class',
+        usage: 'morphis new:controller <ControllerName>',
+        run() {
+            runNewController(rest);
+        },
+    },
+
+    // ── New validator scaffold ────────────────────────────────────────────────
+    'new:validator': {
+        description: 'Scaffold a Validator class with interface and rule stubs',
+        usage: 'morphis new:validator <ValidatorName>',
+        run() {
+            runNewValidator(rest);
+        },
+    },
+
     // ── New server scaffold ───────────────────────────────────────────────────
     'new:server': {
         description: 'Scaffold a new server (routes file + env file)',
@@ -285,6 +305,8 @@ function printHelp() {
     console.log(chalk.gray('    morphis new:migration   create-users-table  --connection=analytics-db'));
     console.log(chalk.gray('    morphis new:model       Post'));
     console.log(chalk.gray('    morphis new:model       Post                --connection=analytics-db -m -c -r'));
+    console.log(chalk.gray('    morphis new:controller  OrderController'));
+    console.log(chalk.gray('    morphis new:validator   OrderValidator'));
     console.log(chalk.gray('    morphis migrate'));
     console.log(chalk.gray('    morphis migrate                             --connection=analytics-db'));
     console.log(chalk.gray('    morphis route:list      --server=api'));
