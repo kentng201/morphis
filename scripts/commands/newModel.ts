@@ -40,6 +40,7 @@ const BASE_MODEL_CONTENT = [
     ``,
     `export class Model extends SequelizeModel {`,
     `    /** Name of the connection entry in src/config/database.ts. */`,
+    `    static connection: string;`,
     ``,
     `    /** Returns the Sequelize instance for this model's connection. */`,
     `    static getSequelize(): Sequelize {`,

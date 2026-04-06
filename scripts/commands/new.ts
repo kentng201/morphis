@@ -155,12 +155,13 @@ export async function runNew(rest: string[]) {
     console.log();
 
     for (const dir of [
+        'src/config',
         'src/routes',
         'src/controllers',
         'src/middlewares',
         'src/providers',
         'src/services',
-        'src/validations',
+        'src/validators',
         'src/transformers',
         'src/types',
         'src/config',
