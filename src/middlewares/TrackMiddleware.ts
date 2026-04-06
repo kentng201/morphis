@@ -1,8 +1,11 @@
 import { Middleware } from '../http/Middleware';
 import { current } from '../http/Context';
 import type { Request } from '../http/types';
+import { LoggerService } from '../services';
 
 export class TrackMiddleware extends Middleware {
+    readonly loggerService = new LoggerService(TrackMiddleware.name);
+
     /**
      * Handles three decorator use-cases:
      *
@@ -60,8 +63,8 @@ export class TrackMiddleware extends Middleware {
         try {
             res = await next(req);
         } catch (err) {
-            delete current.trackId;
             const message = err instanceof Error ? err.message : String(err);
+            this.loggerService.error(`Error: ${message}\nStack: ${err instanceof Error ? err.stack?.split('\n').join('\t\t\t\n') : 'No stack trace available'}`);
             return withTrackId(Response.json({ error: message }, { status: 500 }));
         }
         delete current.trackId;
