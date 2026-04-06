@@ -124,6 +124,7 @@ export function runNew(rest: string[]) {
                 moduleResolution: 'bundler',
                 experimentalDecorators: true,
                 lib: ['ES2020'],
+                rootDir: 'src',
                 outDir: 'dist',
                 strict: true,
                 esModuleInterop: true,

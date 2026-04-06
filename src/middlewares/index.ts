@@ -4,3 +4,4 @@ export { ValidateMiddleware, Validate } from './ValidateMiddleware';
 export { TransformerMiddleware, Transform } from './TransformerMiddleware';
 export { LoggerMiddleware, Logger } from './LoggerMiddleware';
 export { TrackMiddleware, Track } from './TrackMiddleware';
+export { CorsMiddleware, Cors } from './CorsMiddleware';
