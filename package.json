@@ -10,6 +10,9 @@
         "scripts/",
         "src/"
     ],
+    "peerDependencies": {
+        "sequelize": ">=6"
+    },
     "devDependencies": {
         "@types/bun": "latest",
         "ts-node": "^10.9.2",

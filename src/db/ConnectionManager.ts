@@ -1,4 +1,4 @@
-import { Sequelize } from 'sequelize';
+import type { Sequelize } from 'sequelize';
 import path from 'path';
 
 const registry = new Map<string, Sequelize>();
@@ -43,6 +43,7 @@ export class ConnectionManager {
             throw new Error(`Connection "${connectionName}" not found in src/config/database.ts`);
         }
 
+        const { Sequelize } = await import('sequelize');
         const instance = new Sequelize({
             dialect: config.driver,
             ...config.connection,
