@@ -17,6 +17,7 @@ import { runNew } from './commands/new';
 import { runNewConnection } from './commands/newConnection';
 import { runMigrate } from './commands/migrate';
 import { runNewMigration } from './commands/newMigration';
+import { runNewModel } from './commands/newModel';
 import { runNewServer } from './commands/newServer';
 
 // ---------------------------------------------------------------------------
@@ -165,6 +166,15 @@ const commands: Record<string, CommandDef> = {
         },
     },
 
+    // ── New model scaffold ─────────────────────────────────────────────────────
+    'new:model': {
+        description: 'Scaffold a Model class (optionally with migration, controller, factory, seeder)',
+        usage: 'morphis new:model <ModelName> [--connection=<name>] [-m] [-c] [-r] [-f] [-s]',
+        async run() {
+            await runNewModel(rest);
+        },
+    },
+
     // ── New server scaffold ───────────────────────────────────────────────────
     'new:server': {
         description: 'Scaffold a new server (routes file + env file)',
@@ -273,6 +283,8 @@ function printHelp() {
     console.log(chalk.gray('    morphis new:connection'));
     console.log(chalk.gray('    morphis new:migration   create-users-table'));
     console.log(chalk.gray('    morphis new:migration   create-users-table  --connection=analytics-db'));
+    console.log(chalk.gray('    morphis new:model       Post'));
+    console.log(chalk.gray('    morphis new:model       Post                --connection=analytics-db -m -c -r'));
     console.log(chalk.gray('    morphis migrate'));
     console.log(chalk.gray('    morphis migrate                             --connection=analytics-db'));
     console.log(chalk.gray('    morphis route:list      --server=api'));
