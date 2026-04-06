@@ -1,6 +1,7 @@
 import { HttpMethod, Request, RawRequest } from './types';
 import { HttpMethodMiddleware, ValidateMiddleware, EndpointMiddleware } from './decorators';
 import { TransformerMiddleware } from '../middlewares/TransformerMiddleware';
+import { ConnectMiddleware } from '../middlewares/ConnectMiddleware';
 import { Middleware } from './Middleware';
 import { runWithContext } from './Context';
 import { ROUTE_KEY } from './metadata';
@@ -108,11 +109,26 @@ export class Router {
         );
     }
 
+    /**
+     * Wraps a handler with any ConnectMiddleware instances in the array.
+     * Connection is resolved innermost — after validation and transform, before the handler.
+     */
+    private applyConnectMiddlewares(
+        handler: (req: Request) => unknown,
+        middlewares: EndpointMiddleware[],
+    ): (req: Request) => unknown {
+        const connects = middlewares.filter((m): m is ConnectMiddleware => (m as any)._kind === 'connect');
+        return connects.reduceRight(
+            (next, mw) => (req: Request) => mw.handler(req, next as (req: Request) => Promise<unknown>) as Promise<unknown>,
+            handler,
+        );
+    }
+
     /** Collect middleware names for route inspection (excludes the method middleware). */
     private collectMiddlewareNames(middlewares: EndpointMiddleware[]): string[] {
         return middlewares
-            .filter((m): m is ValidateMiddleware | TransformerMiddleware =>
-                (m as any)._kind === 'validate' || (m as any)._kind === 'transform',
+            .filter((m): m is ValidateMiddleware | TransformerMiddleware | ConnectMiddleware =>
+                (m as any)._kind === 'validate' || (m as any)._kind === 'transform' || (m as any)._kind === 'connect',
             )
             .map(m => m.constructor.name);
     }
@@ -131,7 +147,8 @@ export class Router {
     endpoint(handler: (req: Request) => unknown, middlewares: EndpointMiddleware[]): this {
         const methodMw = middlewares.find((m): m is HttpMethodMiddleware => (m as any)._kind === 'method');
         if (!methodMw) return this;
-        const transformWrapped = this.applyTransformMiddlewares(handler, middlewares);
+        const connectWrapped = this.applyConnectMiddlewares(handler, middlewares);
+        const transformWrapped = this.applyTransformMiddlewares(connectWrapped, middlewares);
         const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
         const action = handler.name.replace(/^bound\s+/, '') || '<anonymous>';
         const mwNames = this.collectMiddlewareNames(middlewares);
@@ -150,7 +167,8 @@ export class Router {
             // Path and method come from the HttpMethodMiddleware inside the array
             const methodMw = middlewares.find((m): m is HttpMethodMiddleware => (m as any)._kind === 'method');
             if (!methodMw) return this;
-            const transformWrapped = this.applyTransformMiddlewares(fn, middlewares);
+            const connectWrapped = this.applyConnectMiddlewares(fn, middlewares);
+            const transformWrapped = this.applyTransformMiddlewares(connectWrapped, middlewares);
             const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
             const action = fn.name.replace(/^bound\s+/, '') || '<anonymous>';
             const mwNames = this.collectMiddlewareNames(middlewares);

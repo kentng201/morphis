@@ -14,6 +14,9 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { runNew } from './commands/new';
+import { runNewConnection } from './commands/newConnection';
+import { runMigrate } from './commands/migrate';
+import { runNewMigration } from './commands/newMigration';
 import { runNewServer } from './commands/newServer';
 
 // ---------------------------------------------------------------------------
@@ -140,7 +143,7 @@ function requireServer(): string {
 interface CommandDef {
     description: string;
     usage: string;
-    run(): void;
+    run(): void | Promise<void>;
 }
 
 const commands: Record<string, CommandDef> = {
@@ -148,8 +151,17 @@ const commands: Record<string, CommandDef> = {
     'new': {
         description: 'Scaffold a new morphis project',
         usage: 'morphis new <project-name>',
-        run() {
-            runNew(rest);
+        async run() {
+            await runNew(rest);
+        },
+    },
+
+    // ── Add a database connection to an existing project ──────────────────────
+    'new:connection': {
+        description: 'Add a new database connection to the project',
+        usage: 'morphis new:connection',
+        async run() {
+            await runNewConnection(rest);
         },
     },
 
@@ -189,6 +201,24 @@ const commands: Record<string, CommandDef> = {
         run() {
             const server = requireServer();
             spawnBun(['--watch', `--env-file=.env.${server}`, 'src/index.ts', `--server=${server}`]);
+        },
+    },
+
+    // ── Migration scaffold ─────────────────────────────────────────────────
+    'new:migration': {
+        description: 'Create an empty SQL migration file',
+        usage: 'morphis new:migration <name> [--connection=<name>]',
+        async run() {
+            await runNewMigration(rest);
+        },
+    },
+
+    // ── Run pending migrations ────────────────────────────────────────────────
+    'migrate': {
+        description: 'Run pending database migrations',
+        usage: 'morphis migrate [--connection=<name>]',
+        async run() {
+            await runMigrate(rest);
         },
     },
 
@@ -239,11 +269,16 @@ function printHelp() {
     );
     console.log();
     console.log(chalk.bold('  Examples'));
-    console.log(chalk.gray('    morphis new         my-app'));
-    console.log(chalk.gray('    morphis route:list  --server=api'));
-    console.log(chalk.gray('    morphis build       --server=chat'));
-    console.log(chalk.gray('    morphis dev         --env=.env.mini'));
-    console.log(chalk.gray('    morphis start       --env=.env.api'));
+    console.log(chalk.gray('    morphis new             my-app'));
+    console.log(chalk.gray('    morphis new:connection'));
+    console.log(chalk.gray('    morphis new:migration   create-users-table'));
+    console.log(chalk.gray('    morphis new:migration   create-users-table  --connection=analytics-db'));
+    console.log(chalk.gray('    morphis migrate'));
+    console.log(chalk.gray('    morphis migrate                             --connection=analytics-db'));
+    console.log(chalk.gray('    morphis route:list      --server=api'));
+    console.log(chalk.gray('    morphis build           --server=chat'));
+    console.log(chalk.gray('    morphis dev             --env=.env.mini'));
+    console.log(chalk.gray('    morphis start           --env=.env.api'));
     console.log();
 }
 
@@ -263,4 +298,4 @@ if (!cmd) {
     process.exit(1);
 }
 
-cmd.run();
+await cmd.run();

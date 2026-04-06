@@ -38,6 +38,15 @@ export class Context {
     trackId?: string;
     /** Full endpoint path set by LoggerMiddleware, e.g. /orders/42 */
     path?: string;
+    /**
+     * Active Sequelize instance set by ConnectMiddleware / @Connect().
+     * Cast to your local `Sequelize` type for full autocompletion:
+     * @example
+     * import type { Sequelize } from 'sequelize';
+     * const db = current.db as Sequelize;
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db?: any;
 }
 
 // ---------------------------------------------------------------------------
