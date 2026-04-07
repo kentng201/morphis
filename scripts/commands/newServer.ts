@@ -61,7 +61,7 @@ export function runNewServer(rest: string[]) {
     );
     console.log(chalk.gray(`    create src/routes/${serverName}.ts`));
 
-    fs.writeFileSync(envFile, `NAME=${serverName}\nPORT=${port}\n`);
+    fs.writeFileSync(envFile, `NAME=${serverName}\nPORT=${port}\nMULTI_THREAD=true\n`);
     console.log(chalk.gray(`    create .env.${serverName}`));
 
     console.log();

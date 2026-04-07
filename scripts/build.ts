@@ -40,6 +40,7 @@ await Bun.write(
 const port = Number(process.env.PORT ?? 3000);
 Bun.serve({
     port,
+    reusePort: process.env.MULTI_THREAD === 'true',
     fetch: router.handle.bind(router),
 });
 console.log(\`Service running on http://localhost:\${port}\`);

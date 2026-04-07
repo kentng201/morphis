@@ -200,51 +200,25 @@ export async function runNew(rest: string[]) {
             ``,
         ].join('\n');
 
-    const indexTs = dbOption
-        ? [
-            `export { };`,
-            ``,
-            `import { ConnectionMiddleware } from 'morphis';`,
-            `import databases from './config/database';`,
-            ``,
-            `const serverArg = process.argv.find(a => a.startsWith('--server='));`,
-            `const server = serverArg ? serverArg.split('=')[1] : 'api';`,
-            ``,
-            `const port = Number(process.env.PORT);`,
-            ``,
-            `const connections = new ConnectionMiddleware(databases);`,
-            `await connections.initialize();`,
-            ``,
-            "const { default: router } = await import(`./routes/${server}`);",
-            ``,
-            `router.use(connections);`,
-            ``,
-            `Bun.serve({`,
-            `    port,`,
-            `    fetch: router.handle.bind(router),`,
-            `});`,
-            ``,
-            "console.log(`Service running on http://localhost:${port}`);",
-            ``,
-        ].join('\n')
-        : [
-            `export { };`,
-            ``,
-            `const serverArg = process.argv.find(a => a.startsWith('--server='));`,
-            `const server = serverArg ? serverArg.split('=')[1] : 'api';`,
-            ``,
-            `const port = Number(process.env.PORT);`,
-            ``,
-            "const { default: router } = await import(`./routes/${server}`);",
-            ``,
-            `Bun.serve({`,
-            `    port,`,
-            `    fetch: router.handle.bind(router),`,
-            `});`,
-            ``,
-            "console.log(`Service running on http://localhost:${port}`);",
-            ``,
-        ].join('\n');
+    const indexTs = [
+        `export { };`,
+        ``,
+        `const serverArg = process.argv.find(a => a.startsWith('--server='));`,
+        `const server = serverArg ? serverArg.split('=')[1] : 'api';`,
+        ``,
+        `const port = Number(process.env.PORT);`,
+        ``,
+        "const { default: router } = await import(`./routes/${server}`);",
+        ``,
+        `Bun.serve({`,
+        `    port,`,
+        `    reusePort: process.env.MULTI_THREAD === 'true',`,
+        `    fetch: router.handle.bind(router),`,
+        `});`,
+        ``,
+        "console.log(`Service running on http://localhost:${port}`);",
+        ``,
+    ].join('\n');
 
     const files: Record<string, string> = {
         'src/index.ts': indexTs,
@@ -262,7 +236,7 @@ export async function runNew(rest: string[]) {
 
         'src/types/Context.d.ts': contextDts,
 
-        '.env.api': `NAME=api\nPORT=3000\n`,
+        '.env.api': `NAME=api\nPORT=3000\nMULTI_THREAD=true\n`,
 
         'package.json': JSON.stringify({
             name: projectName,
