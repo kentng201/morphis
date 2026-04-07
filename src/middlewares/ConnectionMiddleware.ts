@@ -53,11 +53,20 @@ export class ConnectionMiddleware extends Middleware {
         let SequelizeCtor: any;
         try {
             const dynamicImport = new Function('pkg', 'return import(pkg)');
-            const mod = await dynamicImport('sequelize');
+            // Resolve sequelize from the target project's cwd so that Sequelize's
+            // own dialect drivers (pg, mysql2, etc.) are resolved from the target
+            // project's node_modules rather than morphis's node_modules.
+            let sequelizePath: string;
+            try {
+                sequelizePath = require.resolve('sequelize', { paths: [process.cwd()] });
+            } catch {
+                sequelizePath = 'sequelize';
+            }
+            const mod = await dynamicImport(sequelizePath);
             SequelizeCtor = mod.Sequelize ?? mod.default;
         } catch {
             throw new Error(
-                '[ConnectionMiddleware] sequelize is not installed. Run: bun add sequelize',
+                '[ConnectionMiddleware] sequelize is not installed in your project. Run: bun add sequelize',
             );
         }
 

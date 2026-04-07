@@ -6,50 +6,6 @@ import { runInProject } from '../utils/spawnInProject';
 /** Drivers that support table introspection via Sequelize */
 const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite']);
 
-/**
- * Content of the base Model.ts scaffolded once into the target project at
- * src/models/Model.ts. It extends Sequelize's Model and resolves the correct
- * Sequelize instance from the project's own src/config/database.ts.
- */
-const BASE_MODEL_CONTENT = [
-    `import { Model as SequelizeModel, Sequelize } from 'sequelize';`,
-    `import databases from '../config/database';`,
-    ``,
-    `const registry = new Map<string, Sequelize>();`,
-    ``,
-    `function resolve(connectionName: string): Sequelize {`,
-    `    if (registry.has(connectionName)) return registry.get(connectionName)!;`,
-    ``,
-    `    const config: any = connectionName === 'default'`,
-    `        ? (databases.find((d: any) => d.isDefault) ?? databases[0])`,
-    `        : databases.find((d: any) => d.name === connectionName);`,
-    ``,
-    `    if (!config) {`,
-    `        throw new Error(\`Connection "\${connectionName}" not found in src/config/database.ts\`);`,
-    `    }`,
-    ``,
-    `    const instance = new Sequelize({`,
-    `        dialect: config.driver,`,
-    `        ...config.connection,`,
-    `        logging: false,`,
-    `    });`,
-    ``,
-    `    registry.set(connectionName, instance);`,
-    `    return instance;`,
-    `}`,
-    ``,
-    `export class Model extends SequelizeModel {`,
-    `    /** Name of the connection entry in src/config/database.ts. */`,
-    `    static connection: string;`,
-    ``,
-    `    /** Returns the Sequelize instance for this model's connection. */`,
-    `    static getSequelize(): Sequelize {`,
-    `        return resolve((this as typeof Model).connection);`,
-    `    }`,
-    `}`,
-    ``,
-].join('\n');
-
 /** Convert PascalCase / camelCase → snake_case */
 function toSnakeCase(str: string): string {
     return str
@@ -211,7 +167,7 @@ await sequelize.close();
     });
 
     const modelContent = [
-        `import { Model } from './Model';`,
+        `import { Model } from 'morphis';`,
         ``,
         `export class ${modelName} extends Model {`,
         `    static connection = ${JSON.stringify(resolvedConnectionName)};`,
@@ -220,17 +176,9 @@ await sequelize.close();
         ``,
     ].join('\n');
 
-    // ── Scaffold base Model.ts in the target project (once) ─────────────────
+    // ── Write model file ──────────────────────────────────────────────────────
     const modelsDir = path.join(cwd, 'src', 'models');
     fs.mkdirSync(modelsDir, { recursive: true });
-
-    const baseModelFile = path.join(modelsDir, 'Model.ts');
-    if (!fs.existsSync(baseModelFile)) {
-        fs.writeFileSync(baseModelFile, BASE_MODEL_CONTENT);
-        console.log(chalk.gray('    create src/models/Model.ts'));
-    }
-
-    // ── Write model file ──────────────────────────────────────────────────────
     const modelFile = path.join(modelsDir, `${modelName}.ts`);
     if (fs.existsSync(modelFile)) {
         console.error(chalk.red(`  src/models/${modelName}.ts already exists — aborting\n`));

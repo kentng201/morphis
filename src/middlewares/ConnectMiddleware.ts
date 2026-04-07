@@ -2,10 +2,14 @@ import { Middleware } from '../http/Middleware';
 import type { Request } from '../http/types';
 import { current } from '../http/Context';
 import { ConnectionMiddleware } from './ConnectionMiddleware';
+import { ConnectionManager } from '../db/ConnectionManager';
+import { LoggerService } from '../services';
 
 export class ConnectMiddleware extends Middleware {
     readonly _kind = 'connect' as const;
     readonly connectionName: string;
+
+    readonly loggerService = new LoggerService(ConnectMiddleware.name);
 
     constructor(name: string = 'default') {
         super();
@@ -38,24 +42,33 @@ export class ConnectMiddleware extends Middleware {
      * - Authentication fails on first use
      */
     async handler(req: Request, next: (req: Request) => Promise<unknown>): Promise<unknown> {
-        const instance = ConnectionMiddleware.get(this.connectionName);
+        let instance = ConnectionMiddleware.get(this.connectionName);
 
         if (!instance) {
-            return Response.json(
-                {
-                    error: `Database connection "${this.connectionName}" is not available. ` +
-                        `Did you call ConnectionMiddleware.initialize()?`,
-                },
-                { status: 503 },
-            );
+            // Lazily create the connection from src/config/database.ts on first use.
+            try {
+                instance = await ConnectionManager.get(this.connectionName);
+            } catch (err) {
+                return Response.json(
+                    {
+                        error: `Database connection "${this.connectionName}" is not available: ${err instanceof Error ? err.message : String(err)
+                            }`,
+                    },
+                    { status: 503 },
+                );
+            }
         }
 
         // Authenticate once per connection name — cached in the authenticated set.
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        const resolved = instance!;
         if (!ConnectionMiddleware.authenticated.has(this.connectionName)) {
             try {
-                await instance.authenticate();
+                await resolved.authenticate();
                 ConnectionMiddleware.authenticated.add(this.connectionName);
             } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                this.loggerService.error(`Error: ${message}\nStack: ${err instanceof Error ? err.stack?.split('\n').join('\t\t\t\n') : 'No stack trace available'}`);
                 return Response.json(
                     {
                         error: `Database connection "${this.connectionName}" is unavailable: ${err instanceof Error ? err.message : String(err)
@@ -67,7 +80,7 @@ export class ConnectMiddleware extends Middleware {
         }
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (current as any).db = instance;
+        (current as any).db = resolved;
         return next(req);
     }
 }

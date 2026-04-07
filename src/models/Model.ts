@@ -125,6 +125,71 @@ export class Model extends SequelizeModel {
 
         booted.add(this);
     }
+
+    // ── Lazy-init query method overrides ─────────────────────────────────────
+    // Intercept the most-used static Sequelize query methods so that
+    // `Model.initialize()` is called automatically on first use.
+    // This means consumers don't need an explicit `bootstrap()` call.
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static override async findAll(this: any, ...args: any[]): Promise<any> {
+        await this.initialize();
+        return super.findAll(...args);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static override async findOne(this: any, ...args: any[]): Promise<any> {
+        await this.initialize();
+        return super.findOne(...args);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static override async findByPk(this: any, ...args: any[]): Promise<any> {
+        await this.initialize();
+        return super.findByPk(...args);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static override async create(this: any, ...args: any[]): Promise<any> {
+        await this.initialize();
+        return super.create(...args);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static override async bulkCreate(this: any, records: any, options?: any): Promise<any> {
+        await this.initialize();
+        return super.bulkCreate(records, options);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static override async update(this: any, values: any, options: any): Promise<any> {
+        await this.initialize();
+        return super.update(values, options);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static override async destroy(this: any, ...args: any[]): Promise<any> {
+        await this.initialize();
+        return super.destroy(...args);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static override async count(this: any, ...args: any[]): Promise<any> {
+        await this.initialize();
+        return super.count(...args);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static override async findAndCountAll(this: any, ...args: any[]): Promise<any> {
+        await this.initialize();
+        return super.findAndCountAll(...args);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static override async upsert(this: any, values: any, options?: any): Promise<any> {
+        await this.initialize();
+        return super.upsert(values, options);
+    }
 }
 
 /**

@@ -1,7 +1,7 @@
-import type { Sequelize } from 'sequelize';
 import path from 'path';
 
-const registry = new Map<string, Sequelize>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const registry = new Map<string, any>();
 
 /**
  * Manages Sequelize instances keyed by connection name.
@@ -13,7 +13,8 @@ export class ConnectionManager {
      * creating it on first access by loading the consuming project's
      * src/config/database.ts.
      */
-    static async get(connectionName: string): Promise<Sequelize> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static async get(connectionName: string): Promise<any> {
         if (registry.has(connectionName)) {
             return registry.get(connectionName)!;
         }
@@ -43,8 +44,20 @@ export class ConnectionManager {
             throw new Error(`Connection "${connectionName}" not found in src/config/database.ts`);
         }
 
-        const { Sequelize } = await import('sequelize');
-        const instance = new Sequelize({
+        // Resolve sequelize from the target project's cwd so that dialect
+        // drivers (pg, mysql2, etc.) are resolved from the consumer's
+        // node_modules rather than morphis's own node_modules.
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval
+        const dynamicImport = new Function('pkg', 'return import(pkg)');
+        let sequelizePath: string;
+        try {
+            sequelizePath = require.resolve('sequelize', { paths: [process.cwd()] });
+        } catch {
+            sequelizePath = 'sequelize';
+        }
+        const seqMod = await dynamicImport(sequelizePath);
+        const SequelizeCtor = seqMod.Sequelize ?? seqMod.default;
+        const instance = new SequelizeCtor({
             dialect: config.driver,
             ...config.connection,
             logging: false,
@@ -55,7 +68,8 @@ export class ConnectionManager {
     }
 
     /** Manually register a pre-built Sequelize instance (useful for testing). */
-    static set(connectionName: string, instance: Sequelize): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static set(connectionName: string, instance: any): void {
         registry.set(connectionName, instance);
     }
 
