@@ -5,8 +5,8 @@
  *   bun scripts/listRoutes.ts --server=api
  */
 
-import type { HttpMethod } from '../src/http/types';
 import path from 'path';
+import { HttpMethod } from '../../src';
 
 const serverArg = process.argv.find(a => a.startsWith('--server='));
 const server = serverArg ? serverArg.split('=')[1] : null;
