@@ -243,9 +243,9 @@ export async function runNew(rest: string[]) {
             version: '0.1.0',
             private: true,
             scripts: {
-                dev: 'morphis dev --server=api',
-                build: 'morphis build --server=api',
-                start: 'morphis start --server=api',
+                dev: `morphis dev --server=api --project=${projectName}`,
+                build: `morphis build --server=api --project=${projectName}`,
+                start: `morphis start --server=api --project=${projectName}`,
                 'route:list': 'morphis route:list --server=api',
             },
             ...(dbOption

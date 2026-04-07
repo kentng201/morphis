@@ -40,6 +40,30 @@ export function runNewServer(rest: string[]) {
         process.exit(1);
     }
 
+    // ── Read package.json for project name and existing scripts ──────────────
+    const pkgPath = path.join(cwd, 'package.json');
+    let pkg: Record<string, unknown> = {};
+    if (fs.existsSync(pkgPath)) {
+        try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch { /* ignore */ }
+    }
+    const projectName: string = typeof pkg.name === 'string' && pkg.name ? pkg.name : '';
+    const scripts: Record<string, string> =
+        pkg.scripts && typeof pkg.scripts === 'object' ? { ...(pkg.scripts as Record<string, string>) } : {};
+
+    const newScripts: Record<string, string> = {
+        [`dev:${serverName}`]: `morphis dev --server=${serverName}${projectName ? ` --project=${projectName}` : ''}`,
+        [`build:${serverName}`]: `morphis build --server=${serverName}${projectName ? ` --project=${projectName}` : ''}`,
+        [`start:${serverName}`]: `morphis start --server=${serverName}${projectName ? ` --project=${projectName}` : ''}`,
+    };
+
+    const conflicting = Object.keys(newScripts).filter(k => k in scripts);
+    if (conflicting.length > 0) {
+        console.error(chalk.red(`\n  The following scripts already exist in package.json:`));
+        for (const k of conflicting) console.error(chalk.gray(`    ${k}: ${scripts[k]}`));
+        console.error(chalk.red(`  Aborting. Remove or rename them first.\n`));
+        process.exit(1);
+    }
+
     console.log();
     console.log(chalk.bold.cyan('  Creating server') + chalk.gray(` → ${serverName}`));
     console.log();
@@ -64,8 +88,17 @@ export function runNewServer(rest: string[]) {
     fs.writeFileSync(envFile, `NAME=${serverName}\nPORT=${port}\nMULTI_THREAD=true\n`);
     console.log(chalk.gray(`    create .env.${serverName}`));
 
+    // ── Inject new scripts into package.json ─────────────────────────────────
+    if (fs.existsSync(pkgPath)) {
+        pkg.scripts = { ...scripts, ...newScripts };
+        fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 4) + '\n');
+        for (const k of Object.keys(newScripts)) {
+            console.log(chalk.gray(`    update package.json → scripts.${k}`));
+        }
+    }
+
     console.log();
     console.log(chalk.bold('  Run it with:'));
-    console.log(chalk.cyan(`    morphis dev --server=${serverName}`));
+    console.log(chalk.cyan(`    bun run dev:${serverName}`));
     console.log();
 }

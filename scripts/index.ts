@@ -21,6 +21,7 @@ import { runNewModel } from './commands/newModel';
 import { runNewController } from './commands/newController';
 import { runNewValidator } from './commands/newValidator';
 import { runNewServer } from './commands/newServer';
+import { runKillThread } from './commands/killThread';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -82,6 +83,22 @@ function spawnBun(cmdArgs: string[]) {
         console.error(chalk.red(`  Failed to start process: ${err.message}`));
         process.exit(1);
     });
+}
+
+function getProject(): string | null {
+    const projectArg = rest.find(a => a.startsWith('--project='));
+    if (projectArg) return projectArg.split('=')[1];
+
+    // Fall back to the name field in package.json
+    const pkgPath = path.join(process.cwd(), 'package.json');
+    if (fs.existsSync(pkgPath)) {
+        try {
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            if (typeof pkg.name === 'string' && pkg.name) return pkg.name;
+        } catch { /* ignore */ }
+    }
+
+    return null;
 }
 
 function getServer(): string | null {
@@ -227,10 +244,12 @@ const commands: Record<string, CommandDef> = {
     // ── Dev server ───────────────────────────────────────────────────────────
     'dev': {
         description: 'Start development server in watch mode',
-        usage: 'morphis dev --server=<name>',
+        usage: 'morphis dev --server=<name> [--project=<name>]',
         run() {
             const server = requireServer();
-            spawnBun(['--watch', `--env-file=.env.${server}`, 'src/index.ts', `--server=${server}`]);
+            const project = getProject();
+            const projectArg = project ? [`--project=${project}`] : [];
+            spawnBun(['--watch', `--env-file=.env.${server}`, 'src/index.ts', `--server=${server}`, ...projectArg]);
         },
     },
 
@@ -252,13 +271,24 @@ const commands: Record<string, CommandDef> = {
         },
     },
 
+    // ── Kill threads on a server's port ─────────────────────────────────────
+    'kill:thread': {
+        description: 'Kill all processes listening on the port of a server',
+        usage: 'morphis kill:thread --server=<name> [--project=<name>]',
+        run() {
+            runKillThread(rest);
+        },
+    },
+
     // ── Production server ────────────────────────────────────────────────────
     'start': {
         description: 'Start the built production server',
-        usage: 'morphis start --server=<name>',
+        usage: 'morphis start --server=<name> [--project=<name>]',
         run() {
             const server = requireServer();
-            spawnBun([`--env-file=.env.${server}`, `dist/${server}/index.js`, '--colorless']);
+            const project = getProject();
+            const projectArg = project ? [`--project=${project}`] : [];
+            spawnBun([`--env-file=.env.${server}`, `dist/${server}/index.js`, '--colorless', ...projectArg]);
         },
     },
 };
