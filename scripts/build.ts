@@ -57,6 +57,7 @@ try {
         target: 'bun',
         minify: false,
         naming: `index.[ext]`,
+        packages: 'external',
     });
 } finally {
     await Bun.file(tempEntry).exists() && import('fs').then(fs => fs.unlinkSync(tempEntry));
