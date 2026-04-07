@@ -298,6 +298,14 @@ export async function runNew(rest: string[]) {
         console.log(chalk.gray(`    create ${projectName}/src/config/database.ts`));
     }
 
+    // ── Git init ──────────────────────────────────────────────────────────────
+    try {
+        execSync('git init', { cwd: dest, stdio: 'ignore' });
+        console.log(chalk.gray(`    git init ${projectName}/`));
+    } catch {
+        console.log(chalk.yellow('  Warning: git not found — skipping git init'));
+    }
+
     console.log();
 
     if (!hasBun()) {
