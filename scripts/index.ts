@@ -227,7 +227,7 @@ const commands: Record<string, CommandDef> = {
         usage: 'morphis route:list --server=<name>',
         run() {
             const server = requireServer();
-            spawnBun([path.join(scriptsDir, 'listRoutes.ts'), `--server=${server}`]);
+            spawnBun([path.join(scriptsDir, 'commands', 'listRoutes.ts'), `--server=${server}`]);
         },
     },
 
@@ -237,7 +237,7 @@ const commands: Record<string, CommandDef> = {
         usage: 'morphis build --server=<name>',
         run() {
             const server = requireServer();
-            spawnBun([path.join(scriptsDir, 'build.ts'), `--server=${server}`]);
+            spawnBun([path.join(scriptsDir, 'commands', 'build.ts'), `--server=${server}`]);
         },
     },
 
@@ -283,9 +283,29 @@ const commands: Record<string, CommandDef> = {
     // ── Production server ────────────────────────────────────────────────────
     'start': {
         description: 'Start the built production server',
-        usage: 'morphis start --server=<name> [--project=<name>]',
-        run() {
+        usage: 'morphis start --server=<name> [--project=<name>] [--no-build]',
+        async run() {
             const server = requireServer();
+            const noBuild = rest.includes('--no-build');
+
+            if (!noBuild) {
+                await new Promise<void>((resolve) => {
+                    const buildProc = spawn('bun', [path.join(scriptsDir, 'commands', 'build.ts'), `--server=${server}`], {
+                        stdio: 'inherit',
+                        cwd: process.cwd(),
+                        shell: process.platform === 'win32',
+                    });
+                    buildProc.on('exit', (code) => {
+                        if (code !== 0) process.exit(code ?? 1);
+                        resolve();
+                    });
+                    buildProc.on('error', (err) => {
+                        console.error(chalk.red(`  Build failed: ${err.message}`));
+                        process.exit(1);
+                    });
+                });
+            }
+
             const project = getProject();
             const projectArg = project ? [`--project=${project}`] : [];
             spawnBun([`--env-file=.env.${server}`, `dist/${server}/index.js`, '--colorless', ...projectArg]);
