@@ -4,8 +4,8 @@ import type { Request } from '../http/types';
 export interface CorsOptions {
     /** Allowed origins. Use '*' to allow all, or pass a list of specific origins. */
     origins?: string | string[];
-    methods?: string;
-    headers?: string;
+    methods?: string | string[];
+    headers?: string | string[];
     maxAge?: number;
 }
 
@@ -22,13 +22,14 @@ export class CorsMiddleware extends Middleware {
     constructor(options: CorsOptions = {}) {
         super();
         this.origins = options.origins ?? '*';
-        this.methods = options.methods ?? DEFAULT_METHODS;
-        this.headers = options.headers ?? DEFAULT_HEADERS;
+        this.methods = Array.isArray(options.methods) ? options.methods.join(', ') : (options.methods ?? DEFAULT_METHODS);
+        this.headers = Array.isArray(options.headers) ? options.headers.join(', ') : (options.headers ?? DEFAULT_HEADERS);
         this.maxAge = options.maxAge ?? DEFAULT_MAX_AGE;
     }
 
     private resolveOrigin(requestOrigin: string | null): string {
         if (this.origins === '*') return '*';
+        if (Array.isArray(this.origins) && this.origins.includes('*')) return '*';
         if (!requestOrigin) return '';
 
         const list = Array.isArray(this.origins) ? this.origins : [this.origins];
