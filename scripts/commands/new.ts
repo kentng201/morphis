@@ -293,7 +293,7 @@ export async function runNew(rest: string[]) {
 
     // ── Database config file ──────────────────────────────────────────────────
     if (dbOption) {
-        const entry = buildConnectionEntry(dbOption.driver, 'central-db', true);
+        const entry = buildConnectionEntry(dbOption.driver, 'default', true);
         const dbContent = buildDatabaseFile(entry);
         fs.writeFileSync(path.join(dest, 'src/config/database.ts'), dbContent);
         console.log(chalk.gray(`    create ${projectName}/src/config/database.ts`));

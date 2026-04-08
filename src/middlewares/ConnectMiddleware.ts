@@ -102,7 +102,7 @@ export class ConnectMiddleware extends Middleware {
  *
  * // Controller method decorator
  * \@Get('/orders')
- * \@Connect('central-db')
+ * \@Connect('default')
  * async list(req: Request) {
  *     const db = current.db as Sequelize;
  *     return Order.findAll();
