@@ -24,6 +24,97 @@ function getImageName(cwd: string, server: string): string {
     return `${project}-${server}`;
 }
 
+function getPackageVersion(cwd: string): string {
+    const pkgPath = path.join(cwd, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+        try {
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            if (typeof pkg.version === 'string' && pkg.version) return pkg.version;
+        } catch { /* ignore */ }
+    }
+    return '0.0.1';
+}
+
+/**
+ * Resolves the AWS region in priority order:
+ *   1. --region= CLI arg
+ *   2. AWS_DEFAULT_REGION / AWS_REGION env vars
+ *   3. `aws configure get region` (reads ~/.aws/config default profile)
+ *   4. Falls back to 'ap-southeast-1'
+ */
+function resolveAwsRegion(regionArg?: string): string {
+    if (regionArg) return regionArg;
+    if (process.env.AWS_DEFAULT_REGION) return process.env.AWS_DEFAULT_REGION;
+    if (process.env.AWS_REGION) return process.env.AWS_REGION;
+    const configured = tryExec('aws configure get region');
+    if (configured) return configured;
+    return 'ap-southeast-1';
+}
+
+/**
+ * Lists existing tags in AWS ECR for the given image and returns
+ * the next build-suffixed version, e.g. "0.1.0-1", "0.1.0-2", etc.
+ */
+function resolveAwsNextVersion(opts: {
+    region: string;
+    imageName: string;
+    baseVersion: string;
+}): string {
+    const { region, imageName, baseVersion } = opts;
+
+    const output = tryExec(
+        `aws ecr list-images --repository-name ${imageName} --region ${region} --query "imageIds[*].imageTag" --output text 2>/dev/null`,
+    );
+
+    const escapedBase = baseVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`^${escapedBase}-(\\d+)$`);
+    let maxBuild = 0;
+    if (output) {
+        for (const tag of output.split(/\s+/)) {
+            const match = pattern.exec(tag.trim());
+            if (match) {
+                const n = parseInt(match[1], 10);
+                if (n > maxBuild) maxBuild = n;
+            }
+        }
+    }
+    return `${baseVersion}-${maxBuild + 1}`;
+}
+
+/**
+ * Lists existing tags in GCP Artifact Registry for the given image and returns
+ * the next build-suffixed version, e.g. "0.1.0-1", "0.1.0-2", etc.
+ */
+function resolveGcloudNextVersion(opts: {
+    region: string;
+    gcpProject: string;
+    imageName: string;
+    server: string;
+    baseVersion: string;
+}): string {
+    const { region, gcpProject, imageName, server, baseVersion } = opts;
+    const arHost = `${region}-docker.pkg.dev`;
+    const imageRef = `${arHost}/${gcpProject}/${imageName}/${server}`;
+
+    const output = tryExec(
+        `gcloud artifacts docker tags list ${imageRef} --format="value(tag)" --project=${gcpProject} 2>/dev/null`,
+    );
+
+    const escapedBase = baseVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`^${escapedBase}-(\\d+)$`);
+    let maxBuild = 0;
+    if (output) {
+        for (const line of output.split('\n')) {
+            const match = pattern.exec(line.trim());
+            if (match) {
+                const n = parseInt(match[1], 10);
+                if (n > maxBuild) maxBuild = n;
+            }
+        }
+    }
+    return `${baseVersion}-${maxBuild + 1}`;
+}
+
 function spawnCmd(cmd: string, args: string[], cwd: string): Promise<void> {
     return new Promise((resolve) => {
         const proc = spawn(cmd, args, {
@@ -42,10 +133,14 @@ function spawnCmd(cmd: string, args: string[], cwd: string): Promise<void> {
     });
 }
 
-function tryExec(cmd: string): string {
+function tryExec(cmd: string, opts?: { throws?: boolean }): string {
     try {
         return execSync(cmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    } catch {
+    } catch (err) {
+        if (opts?.throws) {
+            const msg = (err as NodeJS.ErrnoException & { stderr?: Buffer | string }).stderr;
+            throw new Error(msg ? msg.toString().trim() : String(err));
+        }
         return '';
     }
 }
@@ -73,8 +168,9 @@ async function deployAws(opts: {
     version: string;
     region: string;
     functionName: string;
+    roleArn?: string;
 }) {
-    const { cwd, server, imageName, localTag, version, region, functionName } = opts;
+    const { cwd, server, imageName, localTag, version, region, functionName, roleArn } = opts;
 
     // Resolve AWS account ID
     const accountId = tryExec('aws sts get-caller-identity --query Account --output text');
@@ -97,12 +193,19 @@ async function deployAws(opts: {
     }
 
     // Create ECR repo if it doesn't exist (ignore error if already exists)
-    tryExec(`aws ecr create-repository --repository-name ${imageName} --region ${region} 2>/dev/null`);
+    try {
+        tryExec(`aws ecr create-repository --repository-name ${imageName} --region ${region}`, { throws: true });
+    } catch (err) {
+        const msg = String(err);
+        if (!msg.includes('RepositoryAlreadyExistsException')) {
+            console.error(chalk.red(`\n  Failed to create ECR repository "${imageName}":`));
+            console.error(chalk.gray(`  ${msg}\n`));
+            process.exit(1);
+        }
+        // Repository already exists — continue
+    }
 
-    await spawnCmd('docker', [
-        'login', '--username', 'AWS', '--password-stdin', ecrBase,
-    ], cwd).catch(() => { /* handled inside */ });
-
+    console.log(chalk.cyan(`\n  [deploy:aws] Logging in to ECR via Docker ...\n`));
     // Write password via stdin using a sub-process
     await new Promise<void>((resolve) => {
         const proc = spawn(
@@ -143,17 +246,25 @@ async function deployAws(opts: {
             '--region', region,
         ], cwd);
     } else {
-        console.log(chalk.yellow(
-            `\n  Lambda function "${functionName}" does not exist.\n` +
-            `  Create it manually via the AWS Console or AWS CLI, then re-run deploy.\n\n` +
-            `  aws lambda create-function \\\n` +
-            `    --function-name ${functionName} \\\n` +
-            `    --package-type Image \\\n` +
-            `    --code ImageUri=${remoteTag} \\\n` +
-            `    --role arn:aws:iam::${accountId}:role/lambda-execution-role \\\n` +
-            `    --region ${region}\n`,
-        ));
-        process.exit(1);
+        const resolvedRole = roleArn ?? `arn:aws:iam::${accountId}:role/lambda-execution-role`;
+        console.log(chalk.cyan(`\n  [deploy:aws] Creating Lambda function "${functionName}" with role ${resolvedRole} ...\n`));
+        try {
+            tryExec(
+                `aws lambda create-function` +
+                ` --function-name ${functionName}` +
+                ` --package-type Image` +
+                ` --code ImageUri=${remoteTag}` +
+                ` --role ${resolvedRole}` +
+                ` --region ${region}` +
+                ` --output text`,
+                { throws: true },
+            );
+        } catch (err) {
+            console.error(chalk.red(`\n  Failed to create Lambda function "${functionName}":`));
+            console.error(chalk.gray(`  ${String(err)}\n`));
+            console.error(chalk.gray(`  If the role does not exist, pass a valid execution role ARN with --role=<ARN>\n`));
+            process.exit(1);
+        }
     }
 
     console.log(chalk.green(`\n  [deploy:aws] Deployed to Lambda: ${chalk.bold(functionName)}\n`));
@@ -453,6 +564,7 @@ export async function runDeploy(args: string[]) {
     const regionArg = args.find(a => a.startsWith('--region='));
     const projectArg = args.find(a => a.startsWith('--gcp-project='));
     const functionArg = args.find(a => a.startsWith('--function='));
+    const roleArg = args.find(a => a.startsWith('--role='));
     const serviceArg = args.find(a => a.startsWith('--service='));
     const workerArg = args.find(a => a.startsWith('--worker='));
     const maxInstancesArg = args.find(a => a.startsWith('--max-instances='));
@@ -463,7 +575,7 @@ export async function runDeploy(args: string[]) {
 
     const server = serverArg?.split('=')[1];
     const target = targetArg?.split('=')[1];
-    const version = versionArg?.split('=')[1] ?? 'latest';
+    let version = versionArg?.split('=')[1] ?? 'latest';
 
     if (!server) {
         console.error(chalk.red('\n  Missing required option: --server=<name>\n'));
@@ -479,6 +591,29 @@ export async function runDeploy(args: string[]) {
     const cwd = process.cwd();
     const imageName = getImageName(cwd, server);
 
+    // For aws without an explicit --version, auto-resolve from package.json + ECR tags
+    if (target === 'aws' && !versionArg) {
+        const region = resolveAwsRegion(regionArg?.split('=')[1]);
+        const baseVersion = getPackageVersion(cwd);
+        console.log(chalk.cyan(`\n  [deploy:aws] Resolving version from package.json: ${baseVersion} ...`));
+        version = resolveAwsNextVersion({ region, imageName, baseVersion });
+        console.log(chalk.cyan(`  [deploy:aws] Next version: ${chalk.bold(version)}\n`));
+    }
+
+    // For gcloud without an explicit --version, auto-resolve from package.json + Artifact Registry tags
+    if (target === 'gcloud' && !versionArg) {
+        const region = regionArg?.split('=')[1] ?? 'asia-east1';
+        const gcpProject = projectArg?.split('=')[1] ?? process.env.GCLOUD_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT ?? '';
+        if (!gcpProject) {
+            console.error(chalk.red('\n  Missing --gcp-project=<id> or GCLOUD_PROJECT env var for Google Cloud Run deployment.\n'));
+            process.exit(1);
+        }
+        const baseVersion = getPackageVersion(cwd);
+        console.log(chalk.cyan(`\n  [deploy:gcloud] Resolving version from package.json: ${baseVersion} ...`));
+        version = resolveGcloudNextVersion({ region, gcpProject, imageName, server, baseVersion });
+        console.log(chalk.cyan(`  [deploy:gcloud] Next version: ${chalk.bold(version)}\n`));
+    }
+
     if (target === 'cloudflare') {
         const workerName = workerArg?.split('=')[1] ?? imageName;
         const maxInstances = Number(maxInstancesArg?.split('=')[1] ?? '3');
@@ -491,12 +626,18 @@ export async function runDeploy(args: string[]) {
     // For aws / gcloud — build Docker image first
     const localTag = noBuildDocker
         ? `${imageName}:${version}`
-        : await runDockerBuild([`--server=${server}`, `--version=${version}`, ...(noBuild ? ['--no-build'] : [])]);
+        : await runDockerBuild([
+            `--server=${server}`,
+            `--version=${version}`,
+            ...(noBuild ? ['--no-build'] : []),
+            ...(target === 'aws' ? ['--lambda'] : []),
+        ]);
 
     if (target === 'aws') {
-        const region = regionArg?.split('=')[1] ?? process.env.AWS_DEFAULT_REGION ?? 'ap-southeast-1';
+        const region = resolveAwsRegion(regionArg?.split('=')[1]);
         const functionName = functionArg?.split('=')[1] ?? imageName;
-        await deployAws({ cwd, server, imageName, localTag, version, region, functionName });
+        const roleArn = roleArg?.split('=')[1];
+        await deployAws({ cwd, server, imageName, localTag, version, region, functionName, roleArn });
     }
 
     if (target === 'gcloud') {
