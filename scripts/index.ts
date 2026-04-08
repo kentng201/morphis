@@ -18,6 +18,7 @@ import { runNewConnection } from './commands/newConnection';
 import { runMigrate } from './commands/migrate';
 import { runNewMigration } from './commands/newMigration';
 import { runNewModel } from './commands/newModel';
+import { runSyncModel } from './commands/syncModel';
 import { runNewController } from './commands/newController';
 import { runNewValidator } from './commands/newValidator';
 import { runNewServer } from './commands/newServer';
@@ -191,6 +192,15 @@ const commands: Record<string, CommandDef> = {
         usage: 'morphis new:model <ModelName> [--connection=<name>] [-m] [-c] [-r] [-f] [-s]',
         async run() {
             await runNewModel(rest);
+        },
+    },
+
+    // ── Sync model fields from database ────────────────────────────────────────
+    'sync:model': {
+        description: 'Sync declared fields of an existing Model from live database columns',
+        usage: 'morphis sync:model <ModelName> [--connection=<name>]',
+        async run() {
+            await runSyncModel(rest);
         },
     },
 

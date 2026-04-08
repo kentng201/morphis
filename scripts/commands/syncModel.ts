@@ -23,7 +23,6 @@ function pluralize(word: string): string {
 /** Map a SQL column type string to a TypeScript type */
 function sqlTypeToTs(sqlType: string): string {
     const t = sqlType.toUpperCase();
-    // TINYINT(1) is MySQL/MariaDB's boolean representation — check before TINYINT
     if (/^TINYINT\(1\)/.test(t)) return 'boolean';
     if (/^(INT|INTEGER|BIGINT|SMALLINT|TINYINT|MEDIUMINT)/.test(t)) return 'number';
     if (/^(FLOAT|DOUBLE|DECIMAL|NUMERIC|REAL)/.test(t)) return 'number';
@@ -35,15 +34,14 @@ function sqlTypeToTs(sqlType: string): string {
     return 'any';
 }
 
-export async function runNewModel(rest: string[]) {
-    const cwd = process.cwd();
+/**
+ * Regex that matches the declare fields block inside a model class.
+ * Captures everything between the last static property line and the closing `}`.
+ */
+const DECLARE_BLOCK_RE = /(\n[ \t]*declare\s[^\n]+)+/g;
 
-    // ── Parse flags ───────────────────────────────────────────────────────────
-    const withMigration = rest.includes('-m');
-    const withController = rest.includes('-c') || rest.includes('-r');
-    const withResource = rest.includes('-r');
-    const withFactory = rest.includes('-f');
-    const withSeeder = rest.includes('-s');
+export async function runSyncModel(rest: string[]) {
+    const cwd = process.cwd();
 
     const connArg = rest.find(a => a.startsWith('--connection='));
     const connectionName = connArg ? connArg.split('=')[1] : 'default';
@@ -52,7 +50,7 @@ export async function runNewModel(rest: string[]) {
     const modelName = rest.find(a => !a.startsWith('-'));
     if (!modelName) {
         console.error(chalk.red('\n  Missing required argument: <ModelName>'));
-        console.error(chalk.gray('  Example: morphis new:model Post\n'));
+        console.error(chalk.gray('  Example: morphis sync:model Post\n'));
         process.exit(1);
     }
     if (!/^[A-Z][A-Za-z0-9]*$/.test(modelName)) {
@@ -69,6 +67,12 @@ export async function runNewModel(rest: string[]) {
     const configPath = path.join(cwd, 'src', 'config', 'database.ts');
     if (!fs.existsSync(configPath)) {
         console.error(chalk.red('\n  src/config/database.ts not found. Run: morphis new:connection\n'));
+        process.exit(1);
+    }
+
+    const modelFile = path.join(cwd, 'src', 'models', `${modelName}.ts`);
+    if (!fs.existsSync(modelFile)) {
+        console.error(chalk.red(`\n  src/models/${modelName}.ts not found. Run: morphis new:model ${modelName}\n`));
         process.exit(1);
     }
 
@@ -102,26 +106,32 @@ export async function runNewModel(rest: string[]) {
 
     const driver: string = config.driver;
 
-    // ── Derive table name (PascalCase → snake_case → pluralise) ──────────────
-    const snakeName = toSnakeCase(modelName);   // UserProfile → user_profile
-    const tableName = pluralize(snakeName);     // user_profile → user_profiles
+    if (!SQL_DRIVERS.has(driver)) {
+        console.error(chalk.red(
+            `\n  Driver "${driver}" does not support table introspection.\n` +
+            '  Supported: mysql, mariadb, postgres, mssql, sqlite\n',
+        ));
+        process.exit(1);
+    }
+
+    // ── Derive table name ─────────────────────────────────────────────────────
+    const tableName = pluralize(toSnakeCase(modelName));
 
     console.log();
     console.log(
-        chalk.bold.cyan('  Generating model') +
+        chalk.bold.cyan('  Syncing model') +
         chalk.gray(` → ${modelName} (${resolvedConnectionName}, table: ${tableName})`),
     );
     console.log();
 
-    // ── Introspect DB for column info ─────────────────────────────────────────
+    // ── Introspect DB ─────────────────────────────────────────────────────────
     type ColumnMeta = { type: string; allowNull: boolean; primaryKey: boolean; defaultValue: any };
     let columns: Record<string, ColumnMeta> = {};
 
-    if (SQL_DRIVERS.has(driver)) {
-        const outputFile = path.join(cwd, '.__morphis_columns.json');
-        const connectionJson = JSON.stringify({ ...config.connection });
+    const outputFile = path.join(cwd, '.__morphis_columns.json');
+    const connectionJson = JSON.stringify({ ...config.connection });
 
-        const introspectScript = `
+    const introspectScript = `
 import { Sequelize } from 'sequelize';
 import fs from 'fs';
 
@@ -137,84 +147,60 @@ try {
     const desc = await qi.describeTable(${JSON.stringify(tableName)});
     fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify(desc));
 } catch {
-    // Table does not exist yet or connection failed — write empty result
     fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify({}));
 }
 await sequelize.close();
 `;
 
-        try {
-            await runInProject(cwd, introspectScript);
-            if (fs.existsSync(outputFile)) {
-                const raw = fs.readFileSync(outputFile, 'utf8');
-                columns = JSON.parse(raw);
-                fs.unlinkSync(outputFile);
-            }
-        } catch {
-            // Introspection failed — proceed with empty columns
+    try {
+        await runInProject(cwd, introspectScript);
+        if (fs.existsSync(outputFile)) {
+            const raw = fs.readFileSync(outputFile, 'utf8');
+            columns = JSON.parse(raw);
+            fs.unlinkSync(outputFile);
         }
+    } catch {
+        // Introspection failed — columns stays empty
     }
 
-    // ── Build model file content ──────────────────────────────────────────────
     const columnEntries = Object.entries(columns);
+    if (columnEntries.length === 0) {
+        console.error(chalk.red(
+            `\n  Table "${tableName}" not found or returned no columns.\n` +
+            `  Run ${chalk.cyan('morphis new:migration')} and ${chalk.cyan('morphis migrate')} first.\n`,
+        ));
+        process.exit(1);
+    }
 
+    // ── Build new declare fields ──────────────────────────────────────────────
     const fields = columnEntries.map(([colName, meta]) => {
-        // snake_case column → camelCase property name
         const propName = colName.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
         const tsType = sqlTypeToTs(String(meta.type));
         const nullable = meta.allowNull ? ' | null' : '';
         return `    declare ${propName}: ${tsType}${nullable};`;
     });
 
-    const modelContent = [
-        `import { Model } from 'morphis';`,
-        `import type { ConnectionName } from '../config/database';`,
-        ``,
-        `export class ${modelName} extends Model {`,
-        `    static connection: ConnectionName = ${JSON.stringify(resolvedConnectionName)};`,
-        ...(fields.length > 0 ? [``, ...fields] : []),
-        `}`,
-        ``,
-    ].join('\n');
+    const declareBlock = '\n\n' + fields.join('\n');
 
-    // ── Write model file ──────────────────────────────────────────────────────
-    const modelsDir = path.join(cwd, 'src', 'models');
-    fs.mkdirSync(modelsDir, { recursive: true });
-    const modelFile = path.join(modelsDir, `${modelName}.ts`);
-    if (fs.existsSync(modelFile)) {
-        console.error(chalk.red(`  src/models/${modelName}.ts already exists — aborting\n`));
+    // ── Rewrite the model file ────────────────────────────────────────────────
+    let content = fs.readFileSync(modelFile, 'utf8');
+
+    // Remove existing declare lines (if any)
+    content = content.replace(DECLARE_BLOCK_RE, '');
+
+    // Insert new declare block before the closing `}` of the class
+    const lastBrace = content.lastIndexOf('\n}');
+    if (lastBrace === -1) {
+        console.error(chalk.red('\n  Cannot parse model file — closing `}` not found\n'));
         process.exit(1);
     }
-    fs.writeFileSync(modelFile, modelContent);
-    console.log(chalk.gray(`    create src/models/${modelName}.ts`));
+    content = content.slice(0, lastBrace) + declareBlock + '\n' + content.slice(lastBrace);
 
-    // ── TODO stubs ────────────────────────────────────────────────────────────
-    if (withMigration) {
-        // TODO: scaffold a migration .sql file for this model's table
-        console.log(chalk.yellow(`    todo   -m  migration scaffold (coming soon)`));
-    }
-    if (withController) {
-        // TODO: scaffold a controller file at src/controllers/<ModelName>Controller.ts
-        const label = withResource ? 'resource controller scaffold' : 'controller scaffold';
-        console.log(chalk.yellow(`    todo   -c/-r  ${label} (coming soon)`));
-    }
-    if (withFactory) {
-        // TODO: scaffold a factory file at src/factories/<ModelName>Factory.ts
-        console.log(chalk.yellow(`    todo   -f  factory scaffold (coming soon)`));
-    }
-    if (withSeeder) {
-        // TODO: scaffold a seeder file at src/seeders/<ModelName>Seeder.ts
-        console.log(chalk.yellow(`    todo   -s  seeder scaffold (coming soon)`));
-    }
+    fs.writeFileSync(modelFile, content);
 
-    // ── Summary ───────────────────────────────────────────────────────────────
+    console.log(chalk.gray(`    update src/models/${modelName}.ts`));
     console.log();
-    console.log(chalk.bold('  Model created: ') + chalk.cyan(`src/models/${modelName}.ts`));
-    if (columnEntries.length > 0) {
-        console.log(chalk.gray(`  ${columnEntries.length} column(s) mapped from table "${tableName}"`));
-    } else {
-        console.log(chalk.gray(`  Table "${tableName}" not found or not yet created — model has no declared fields`));
-        console.log(chalk.gray(`  Run ${chalk.cyan('morphis new:migration')} and ${chalk.cyan('morphis migrate')} first, then run ${chalk.cyan(`morphis sync:model ${modelName}`)}.`));
-    }
+    console.log(chalk.bold('  Model synced: ') + chalk.cyan(`src/models/${modelName}.ts`));
+    console.log(chalk.gray(`  ${columnEntries.length} column(s) mapped from table "${tableName}"`));
     console.log();
 }
