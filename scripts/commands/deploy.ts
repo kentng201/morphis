@@ -115,6 +115,64 @@ function resolveGcloudNextVersion(opts: {
     return `${baseVersion}-${maxBuild + 1}`;
 }
 
+/**
+ * Resolves the Cloudflare account ID in priority order:
+ *   1. CLOUDFLARE_ACCOUNT_ID env var
+ *   2. Parsed from `wrangler whoami` output (32-char hex string)
+ */
+function resolveCloudflareAccountId(wranglerCmd: string, wranglerPrefix: string[]): string {
+    if (process.env.CLOUDFLARE_ACCOUNT_ID) return process.env.CLOUDFLARE_ACCOUNT_ID;
+    const output = tryExec(`${wranglerCmd} ${[...wranglerPrefix, 'whoami'].join(' ')}`);
+    const match = /\b([0-9a-f]{32})\b/i.exec(output);
+    return match ? match[1] : '';
+}
+
+/**
+ * Lists existing tags in the Cloudflare Container Registry for the given worker/image
+ * and returns the next build-suffixed version, e.g. "0.1.0-1", "0.1.0-2", etc.
+ *
+ * Requires CLOUDFLARE_API_TOKEN to be set (used by wrangler) and either
+ * CLOUDFLARE_ACCOUNT_ID or a logged-in wrangler session so the account ID can be resolved.
+ */
+function resolveCloudflareNextVersion(opts: {
+    wranglerCmd: string;
+    wranglerPrefix: string[];
+    workerName: string;
+    baseVersion: string;
+}): string {
+    const { wranglerCmd, wranglerPrefix, workerName, baseVersion } = opts;
+    const accountId = resolveCloudflareAccountId(wranglerCmd, wranglerPrefix);
+    const apiToken = process.env.CLOUDFLARE_API_TOKEN ?? '';
+
+    if (accountId && apiToken) {
+        const output = tryExec(
+            `curl -sf -H "Authorization: Bearer ${apiToken}" ` +
+            `"https://registry.cloudflare.com/v2/${accountId}/${workerName}/tags/list" 2>/dev/null`,
+        );
+        let tags: string[] = [];
+        try {
+            if (output) {
+                const parsed = JSON.parse(output) as { tags?: unknown };
+                if (Array.isArray(parsed.tags)) tags = parsed.tags as string[];
+            }
+        } catch { /* ignore */ }
+
+        const escapedBase = baseVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(`^${escapedBase}-(\\d+)$`);
+        let maxBuild = 0;
+        for (const tag of tags) {
+            const match = pattern.exec(String(tag).trim());
+            if (match) {
+                const n = parseInt(match[1], 10);
+                if (n > maxBuild) maxBuild = n;
+            }
+        }
+        return `${baseVersion}-${maxBuild + 1}`;
+    }
+
+    return `${baseVersion}-1`;
+}
+
 function spawnCmd(cmd: string, args: string[], cwd: string): Promise<void> {
     return new Promise((resolve) => {
         const proc = spawn(cmd, args, {
@@ -367,6 +425,8 @@ async function deployCloudflare(opts: {
         }
     };
 
+    let cfContainersWasAdded = false;
+
     try {
         // Step 0: Ensure @cloudflare/containers is installed in the project
         const pkgPath = path.join(cwd, 'package.json');
@@ -378,6 +438,7 @@ async function deployCloudflare(opts: {
                 cfContainersInstalled = '@cloudflare/containers' in deps;
             } catch { /* ignore */ }
         }
+        cfContainersWasAdded = !cfContainersInstalled;
         if (!cfContainersInstalled) {
             console.log(chalk.cyan(`\n  [deploy:cloudflare] Installing @cloudflare/containers ...\n`));
             await spawnCmd('bun', ['add', '-d', '@cloudflare/containers'], cwd);
@@ -445,7 +506,7 @@ async function deployCloudflare(opts: {
         }
 
         // Step 2: Write a Dockerfile that packages the Bun bundle
-        fs.writeFileSync(path.join(cwd, dockerfileName), generateDockerfile(server), 'utf8');
+        fs.writeFileSync(path.join(cwd, dockerfileName), generateDockerfile(server, { port }), 'utf8');
 
         // Step 3: Write a Worker entry that routes all requests into the container.
         //   Uses @cloudflare/containers which wraps Durable Objects boilerplate.
@@ -532,9 +593,12 @@ async function deployCloudflare(opts: {
                     console.error(chalk.yellow('\n  If the error is "Unauthorized" during image push (buildAndMaybePush):'));
                     console.error(chalk.gray('  This means your Cloudflare account does not have access to the Containers beta,'));
                     console.error(chalk.gray('  or your API token is missing the "Cloudflare Containers: Edit" permission.\n'));
+                    console.error(chalk.bold(chalk.yellow('  IMPORTANT: Cloudflare Containers requires a Workers Paid Plan (Workers Unbound).')));
+                    console.error(chalk.gray('  Free plans cannot push container images to the Cloudflare Container Registry.\n'));
                     console.error(chalk.gray('  To fix:'));
-                    console.error(chalk.gray('  1. Join / verify beta access:  https://developers.cloudflare.com/containers/beta-info/'));
-                    console.error(chalk.gray('  2. Re-authenticate with a token that has the Containers permission:'));
+                    console.error(chalk.gray('  1. Upgrade to the Workers Paid Plan:      https://dash.cloudflare.com/?to=/:account/workers/plans'));
+                    console.error(chalk.gray('  2. Join / verify Containers beta access:  https://developers.cloudflare.com/containers/beta-info/'));
+                    console.error(chalk.gray('  3. Re-authenticate with a token that has the "Cloudflare Containers: Edit" permission:'));
                     console.error(chalk.cyan(`       ${wranglerCmd} ${[...wranglerPrefix, 'login'].join(' ')}\n`));
                     process.exit(code ?? 1);
                 }
@@ -550,6 +614,10 @@ async function deployCloudflare(opts: {
         console.log(chalk.gray(`  Note: containers take a few minutes to provision on first deploy.\n`));
     } finally {
         cleanup();
+        if (cfContainersWasAdded) {
+            console.log(chalk.gray(`  [deploy:cloudflare] Removing temporary @cloudflare/containers dependency ...\n`));
+            try { await spawnCmd('bun', ['remove', '@cloudflare/containers'], cwd); } catch { /* ignore */ }
+        }
     }
 }
 
@@ -614,10 +682,20 @@ export async function runDeploy(args: string[]) {
         console.log(chalk.cyan(`  [deploy:gcloud] Next version: ${chalk.bold(version)}\n`));
     }
 
+    // For cloudflare without an explicit --version, auto-resolve from package.json + Cloudflare Container Registry tags
+    if (target === 'cloudflare' && !versionArg) {
+        const [wranglerCmd, wranglerPrefix] = resolveWrangler();
+        const workerNameForVersion = workerArg?.split('=')[1] ?? imageName;
+        const baseVersion = getPackageVersion(cwd);
+        console.log(chalk.cyan(`\n  [deploy:cloudflare] Resolving version from package.json: ${baseVersion} ...`));
+        version = resolveCloudflareNextVersion({ wranglerCmd, wranglerPrefix, workerName: workerNameForVersion, baseVersion });
+        console.log(chalk.cyan(`  [deploy:cloudflare] Next version: ${chalk.bold(version)}\n`));
+    }
+
     if (target === 'cloudflare') {
         const workerName = workerArg?.split('=')[1] ?? imageName;
         const maxInstances = Number(maxInstancesArg?.split('=')[1] ?? '3');
-        const port = Number(portArg?.split('=')[1] ?? '3000');
+        const port = Number(portArg?.split('=')[1] ?? '8080');
         const sleepAfter = sleepAfterArg?.split('=')[1] ?? '2m';
         await deployCloudflare({ cwd, server, version, workerName, maxInstances, port, sleepAfter, noBuild });
         return;
