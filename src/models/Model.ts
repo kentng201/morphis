@@ -15,6 +15,18 @@ function pluralize(word: string): string {
     return word + 's';
 }
 
+function isSqlFunctionDefault(value: any): boolean {
+    if (typeof value !== 'string') return false;
+    const v = value.trim();
+    return /^(current_timestamp|current_date|current_time|now\b)/i.test(v) || v.includes('(');
+}
+
+function normalizeSqlDefault(value: any): any {
+    if (value === null || value === undefined) return undefined;
+    if (isSqlFunctionDefault(value)) return undefined;
+    return value;
+}
+
 function sqlTypeToDataType(type: string): any {
     const t = type.toUpperCase();
     if (/^TINYINT\(1\)/.test(t)) return DataTypes.BOOLEAN;
@@ -103,12 +115,15 @@ export class Model extends SequelizeModel {
                 if (hasTimestamps && /^(created_at|updated_at|createdAt|updatedAt)$/.test(col)) {
                     continue;
                 }
+                const hasSqlDefault = isSqlFunctionDefault(meta.defaultValue);
                 attributes[col] = {
                     type: sqlTypeToDataType(String(meta.type)),
-                    allowNull: meta.allowNull ?? true,
+                    // If the DB supplies the default via a SQL function, let the
+                    // DB handle it — Sequelize must not enforce NOT NULL itself.
+                    allowNull: hasSqlDefault ? true : (meta.allowNull ?? true),
                     primaryKey: meta.primaryKey ?? false,
                     autoIncrement: meta.autoIncrement ?? false,
-                    defaultValue: meta.defaultValue ?? undefined,
+                    defaultValue: normalizeSqlDefault(meta.defaultValue),
                 };
             }
         } catch {
