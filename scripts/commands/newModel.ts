@@ -73,7 +73,7 @@ export async function runNewModel(rest: string[]) {
     }
 
     // ── Load database config ──────────────────────────────────────────────────
-    let databases: any[];
+    let databases: Record<string, any>;
     try {
         const mod = await import(configPath);
         databases = mod.default;
@@ -84,15 +84,16 @@ export async function runNewModel(rest: string[]) {
         process.exit(1);
     }
 
-    if (!Array.isArray(databases) || databases.length === 0) {
+    const entries = Object.entries(databases);
+    if (entries.length === 0) {
         console.error(chalk.red('\n  src/config/database.ts has no connections configured\n'));
         process.exit(1);
     }
 
     // ── Resolve target connection ─────────────────────────────────────────────
-    const config: any = connectionName === 'default'
-        ? (databases.find((d: any) => d.isDefault) ?? databases[0])
-        : databases.find((d: any) => d.name === connectionName);
+    const [resolvedConnectionName, config]: [string, any] = connectionName === 'default'
+        ? (entries.find(([, d]) => d.isDefault) ?? entries[0])
+        : [connectionName, databases[connectionName]];
 
     if (!config) {
         console.error(chalk.red(`\n  Connection "${connectionName}" not found in src/config/database.ts\n`));
@@ -100,7 +101,6 @@ export async function runNewModel(rest: string[]) {
     }
 
     const driver: string = config.driver;
-    const resolvedConnectionName: string = config.name;
 
     // ── Derive table name (PascalCase → snake_case → pluralise) ──────────────
     const snakeName = toSnakeCase(modelName);   // UserProfile → user_profile
@@ -168,9 +168,10 @@ await sequelize.close();
 
     const modelContent = [
         `import { Model } from 'morphis';`,
+        `import type { ConnectionName } from '../config/database';`,
         ``,
         `export class ${modelName} extends Model {`,
-        `    static connection = ${JSON.stringify(resolvedConnectionName)};`,
+        `    static connection: ConnectionName = ${JSON.stringify(resolvedConnectionName)};`,
         ...(fields.length > 0 ? [``, ...fields] : []),
         `}`,
         ``,

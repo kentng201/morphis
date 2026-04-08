@@ -22,7 +22,7 @@ export class ConnectionManager {
         const cwd = process.cwd();
         const configPath = path.join(cwd, 'src', 'config', 'database.ts');
 
-        let databases: any[];
+        let databases: Record<string, any>;
         try {
             const mod = await import(configPath);
             databases = mod.default;
@@ -32,13 +32,14 @@ export class ConnectionManager {
             );
         }
 
-        if (!Array.isArray(databases) || databases.length === 0) {
+        const entries = Object.entries(databases);
+        if (entries.length === 0) {
             throw new Error('src/config/database.ts has no connections configured');
         }
 
         const config: any = connectionName === 'default'
-            ? (databases.find((d: any) => d.isDefault) ?? databases[0])
-            : databases.find((d: any) => d.name === connectionName);
+            ? (entries.find(([, d]) => d.isDefault)?.[1] ?? entries[0][1])
+            : databases[connectionName];
 
         if (!config) {
             throw new Error(`Connection "${connectionName}" not found in src/config/database.ts`);

@@ -44,9 +44,34 @@ export interface SnowflakeConnection {
 }
 
 export type DatabaseConfig =
-    | { name: string; isDefault?: boolean; driver: 'mariadb'; connection: MariadbConnection }
-    | { name: string; isDefault?: boolean; driver: 'mysql'; connection: MysqlConnection }
-    | { name: string; isDefault?: boolean; driver: 'mssql'; connection: MssqlConnection }
-    | { name: string; isDefault?: boolean; driver: 'postgres'; connection: PostgresConnection }
-    | { name: string; isDefault?: boolean; driver: 'sqlite'; connection: SqliteConnection }
-    | { name: string; isDefault?: boolean; driver: 'snowflake'; connection: SnowflakeConnection };
+    | { isDefault?: boolean; driver: 'mariadb'; connection: MariadbConnection }
+    | { isDefault?: boolean; driver: 'mysql'; connection: MysqlConnection }
+    | { isDefault?: boolean; driver: 'mssql'; connection: MssqlConnection }
+    | { isDefault?: boolean; driver: 'postgres'; connection: PostgresConnection }
+    | { isDefault?: boolean; driver: 'sqlite'; connection: SqliteConnection }
+    | { isDefault?: boolean; driver: 'snowflake'; connection: SnowflakeConnection };
+
+/**
+ * Define a database configuration map with literal key inference, preventing
+ * duplicate connection names and enabling `DatabaseName<T>` type derivation.
+ *
+ * @example
+ * const databases = defineDatabases({
+ *   default: { isDefault: true, driver: 'postgres', connection: { ... } },
+ *   analytics: { driver: 'postgres', connection: { ... } },
+ * });
+ * export type ConnectionName = DatabaseName<typeof databases>;
+ * export default databases;
+ */
+export function defineDatabases<T extends Record<string, DatabaseConfig>>(config: T): T {
+    return config;
+}
+
+/**
+ * Derives a union of valid connection name strings from a `defineDatabases` result.
+ *
+ * @example
+ * export type ConnectionName = DatabaseName<typeof databases>;
+ * // → 'default' | 'analytics'
+ */
+export type DatabaseName<T extends Record<string, DatabaseConfig>> = keyof T & string;

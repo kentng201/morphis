@@ -73,13 +73,12 @@ function buildConnectionFields(driver: DbDriver): string {
 }
 
 /**
- * Returns the string for a single entry in the databases array.
+ * Returns the string for a single keyed entry in the databases object.
  * Exported so newConnection.ts can reuse this logic.
  */
 export function buildConnectionEntry(driver: DbDriver, name: string, isDefault: boolean): string {
     const lines: string[] = [
-        `    {`,
-        `        name: '${name}',`,
+        `    ${name}: {`,
         ...(isDefault ? [`        isDefault: true,`] : []),
         `        driver: '${driver}',`,
         `        connection: {`,
@@ -96,11 +95,13 @@ export function buildConnectionEntry(driver: DbDriver, name: string, isDefault: 
  */
 export function buildDatabaseFile(entry: string): string {
     return [
-        `import type { DatabaseConfig } from 'morphis';`,
+        `import { defineDatabases, type DatabaseName } from 'morphis';`,
         ``,
-        `const databases: DatabaseConfig[] = [`,
+        `const databases = defineDatabases({`,
         entry,
-        `];`,
+        `});`,
+        ``,
+        `export type ConnectionName = DatabaseName<typeof databases>;`,
         ``,
         `export default databases;`,
         ``,

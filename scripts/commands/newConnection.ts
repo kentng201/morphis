@@ -65,14 +65,14 @@ export async function runNewConnection(_rest: string[]) {
         fs.writeFileSync(configFile, buildDatabaseFile(entry));
         console.log(chalk.gray('    create src/config/database.ts'));
     } else {
-        // Append new entry before the closing `];` that precedes `export default`
+        // Append new entry before the closing `});` that precedes the exports
         const content = fs.readFileSync(configFile, 'utf8');
-        const marker = '];\n\nexport default databases;';
+        const marker = '\n});\n\nexport type ConnectionName';
         if (!content.includes(marker)) {
             console.error(chalk.red('\n  Cannot parse src/config/database.ts — unexpected format\n'));
             process.exit(1);
         }
-        const updated = content.replace(marker, `${entry}\n${marker}`);
+        const updated = content.replace(marker, `\n${entry}${marker}`);
         fs.writeFileSync(configFile, updated);
         console.log(chalk.gray('    update src/config/database.ts'));
     }
