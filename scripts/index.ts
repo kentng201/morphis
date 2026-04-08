@@ -23,6 +23,8 @@ import { runNewController } from './commands/newController';
 import { runNewValidator } from './commands/newValidator';
 import { runNewServer } from './commands/newServer';
 import { runKillThread } from './commands/killThread';
+import { runDockerBuild } from './commands/dockerBuild';
+import { runDeploy } from './commands/deploy';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -281,6 +283,31 @@ const commands: Record<string, CommandDef> = {
         },
     },
 
+    // ── Docker image build ────────────────────────────────────────────────────
+    'docker:build': {
+        description: 'Build a Docker image for a server (runs morphis build first)',
+        usage: 'morphis docker:build --server=<name> [--version=<tag>] [--no-build]',
+        async run() {
+            const server = requireServer();
+            const versionArg = rest.find(a => a.startsWith('--version='));
+            const noBuild = rest.includes('--no-build');
+            await runDockerBuild([
+                `--server=${server}`,
+                ...(versionArg ? [versionArg] : []),
+                ...(noBuild ? ['--no-build'] : []),
+            ]);
+        },
+    },
+
+    // ── Serverless deploy ────────────────────────────────────────────────────
+    'deploy': {
+        description: 'Deploy a server to AWS Lambda, Google Cloud Run, or Cloudflare Containers',
+        usage: 'morphis deploy --server=<name> --target=aws|gcloud|cloudflare [--version=<tag>] [--region=<region>] [--gcp-project=<id>] [--function=<name>] [--service=<name>] [--worker=<name>] [--max-instances=<n>] [--port=<n>] [--sleep-after=<duration>] [--no-build] [--no-docker-build]',
+        async run() {
+            await runDeploy(rest);
+        },
+    },
+
     // ── Kill threads on a server's port ─────────────────────────────────────
     'kill:thread': {
         description: 'Kill all processes listening on the port of a server',
@@ -373,6 +400,10 @@ function printHelp() {
     console.log(chalk.gray('    morphis build           --server=chat'));
     console.log(chalk.gray('    morphis dev             --env=.env.mini'));
     console.log(chalk.gray('    morphis start           --env=.env.api'));
+    console.log(chalk.gray('    morphis docker:build    --server=api --version=1.0.0'));
+    console.log(chalk.gray('    morphis deploy          --server=api --target=aws --version=1.0.0 --region=ap-southeast-1'));
+    console.log(chalk.gray('    morphis deploy          --server=api --target=gcloud --version=1.0.0 --gcp-project=my-project'));
+    console.log(chalk.gray('    morphis deploy          --server=api --target=cloudflare --version=1.0.0'));
     console.log();
 }
 
