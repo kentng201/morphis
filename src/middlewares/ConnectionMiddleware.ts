@@ -32,7 +32,7 @@ export class ConnectionMiddleware extends Middleware {
     /** Tracks which connection names have been successfully authenticated. */
     static readonly authenticated = new Set<string>();
 
-    constructor(private readonly config: DatabaseConfig[]) {
+    constructor(private readonly config: Record<string, DatabaseConfig>) {
         super();
     }
 
@@ -71,7 +71,7 @@ export class ConnectionMiddleware extends Middleware {
         }
 
         await Promise.all(
-            this.config.map(async (cfg) => {
+            Object.entries(this.config).map(async ([name, cfg]) => {
                 const instance: SequelizeLike = new SequelizeCtor({
                     dialect: cfg.driver,
                     ...cfg.connection,
@@ -80,13 +80,13 @@ export class ConnectionMiddleware extends Middleware {
 
                 await instance.authenticate().catch((err: unknown) => {
                     throw new Error(
-                        `[ConnectionMiddleware] Failed to connect "${cfg.name}" (${cfg.driver}): ${err instanceof Error ? err.message : String(err)
+                        `[ConnectionMiddleware] Failed to connect "${name}" (${cfg.driver}): ${err instanceof Error ? err.message : String(err)
                         }`,
                     );
                 });
 
-                ConnectionMiddleware.registry.set(cfg.name, instance);
-                ConnectionMiddleware.authenticated.add(cfg.name);
+                ConnectionMiddleware.registry.set(name, instance);
+                ConnectionMiddleware.authenticated.add(name);
 
                 if (cfg.isDefault) {
                     ConnectionMiddleware.registry.set('default', instance);
