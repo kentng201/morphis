@@ -8,7 +8,7 @@ import { selectOption } from '../utils/prompt';
 // Database option registry (exported for use by new:connection)
 // ---------------------------------------------------------------------------
 
-export type DbDriver = 'mariadb' | 'mysql' | 'mssql' | 'postgres' | 'sqlite' | 'snowflake';
+export type DbDriver = 'mariadb' | 'mysql' | 'mssql' | 'postgres' | 'sqlite';
 
 export interface DbOption {
     label: string;
@@ -17,12 +17,11 @@ export interface DbOption {
 }
 
 export const DB_OPTIONS: DbOption[] = [
-    { label: 'MariaDB', driver: 'mariadb', deps: ['sequelize', 'mariadb'] },
-    { label: 'MySQL', driver: 'mysql', deps: ['sequelize', 'mysql2'] },
-    { label: 'Microsoft SQL', driver: 'mssql', deps: ['sequelize', 'tedious'] },
-    { label: 'PostgreSQL', driver: 'postgres', deps: ['sequelize', 'pg', 'pg-hstore'] },
-    { label: 'SQLite', driver: 'sqlite', deps: ['sequelize', 'sqlite3'] },
-    { label: 'Snowflake', driver: 'snowflake', deps: ['sequelize', 'snowflake-sdk'] },
+    { label: 'MariaDB', driver: 'mariadb', deps: ['drizzle-orm', 'mysql2'] },
+    { label: 'MySQL', driver: 'mysql', deps: ['drizzle-orm', 'mysql2'] },
+    { label: 'Microsoft SQL', driver: 'mssql', deps: ['drizzle-orm', 'mssql'] },
+    { label: 'PostgreSQL', driver: 'postgres', deps: ['drizzle-orm', 'pg'] },
+    { label: 'SQLite', driver: 'sqlite', deps: ['drizzle-orm'] },
 ];
 
 export const NO_DB_LABEL = 'No database needed';
@@ -60,15 +59,6 @@ function buildConnectionFields(driver: DbDriver): string {
             ].join('\n');
         case 'sqlite':
             return `            storage: process.env.DB_STORAGE || './database.sqlite',`;
-        case 'snowflake':
-            return [
-                `            account: process.env.DB_ACCOUNT || '',`,
-                `            username: process.env.DB_USER || '',`,
-                `            password: process.env.DB_PASS || '',`,
-                `            database: process.env.DB_NAME || '',`,
-                `            warehouse: process.env.DB_WAREHOUSE || '',`,
-                `            schema: process.env.DB_SCHEMA || 'PUBLIC',`,
-            ].join('\n');
     }
 }
 
@@ -175,13 +165,10 @@ export async function runNew(rest: string[]) {
         ? [
             `export { };`,
             ``,
-            `import type { Sequelize } from 'sequelize';`,
-            ``,
             `declare module 'morphis' {`,
             `    interface Context {`,
-            `        // db is set by @Connect() / Connect() — cast to Sequelize for typed access.`,
-            `        // Remove this override if you don't need stricter typing.`,
-            `        db?: Sequelize;`,
+            `        // db is set by @Connect() / Connect() — typed as Drizzle db instance.`,
+            `        db?: any;`,
             `        // Add your custom context properties here`,
             `        // userId?: number;`,
             `    }`,

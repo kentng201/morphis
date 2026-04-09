@@ -34,20 +34,20 @@ export class ConnectMiddleware extends Middleware {
     }
 
     /**
-     * Resolves the named Sequelize connection, authenticates it on first use,
-     * sets `current.db` to the instance, then calls `next`.
+     * Resolves the named Drizzle connection on first use,
+     * sets `current.db` to the Drizzle db instance, then calls `next`.
      *
      * Returns a 503 JSON response if:
      * - The connection name is not registered (initialize() not called, or wrong name)
-     * - Authentication fails on first use
+     * - Connection cannot be established
      */
     async handler(req: Request, next: (req: Request) => Promise<unknown>): Promise<unknown> {
-        let instance = ConnectionMiddleware.get(this.connectionName);
+        let entry = ConnectionMiddleware.get(this.connectionName);
 
-        if (!instance) {
+        if (!entry) {
             // Lazily create the connection from src/config/database.ts on first use.
             try {
-                instance = await ConnectionManager.get(this.connectionName);
+                entry = await ConnectionManager.get(this.connectionName);
             } catch (err) {
                 return Response.json(
                     {
@@ -59,28 +59,12 @@ export class ConnectMiddleware extends Middleware {
             }
         }
 
-        // Authenticate once per connection name — cached in the authenticated set.
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        const resolved = instance!;
-        if (!ConnectionMiddleware.authenticated.has(this.connectionName)) {
-            try {
-                await resolved.authenticate();
-                ConnectionMiddleware.authenticated.add(this.connectionName);
-            } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                this.loggerService.error(`Error: ${message}\nStack: ${err instanceof Error ? err.stack?.split('\n').join('\t\t\t\n') : 'No stack trace available'}`);
-                return Response.json(
-                    {
-                        error: `Database connection "${this.connectionName}" is unavailable: ${err instanceof Error ? err.message : String(err)
-                            }`,
-                    },
-                    { status: 503 },
-                );
-            }
-        }
+        const resolved = entry!;
+        ConnectionMiddleware.authenticated.add(this.connectionName);
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (current as any).db = resolved;
+        (current as any).db = resolved.db;
         return next(req);
     }
 }
@@ -104,7 +88,7 @@ export class ConnectMiddleware extends Middleware {
  * \@Get('/orders')
  * \@Connect('default')
  * async list(req: Request) {
- *     const db = current.db as Sequelize;
+ *     const db = current.db; // Drizzle db instance
  *     return Order.findAll();
  * }
  */

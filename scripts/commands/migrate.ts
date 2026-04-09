@@ -4,7 +4,7 @@ import path from 'path';
 import { runInProject } from '../utils/spawnInProject';
 
 /** Drivers that use plain-SQL migrations */
-const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql']);
+const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite']);
 
 export async function runMigrate(rest: string[]) {
     const cwd = process.cwd();
@@ -26,7 +26,7 @@ export async function runMigrate(rest: string[]) {
     }
 
     // ── Load database config ──────────────────────────────────────────────────
-    let databases: any[];
+    let databases: Record<string, any>;
     try {
         const mod = await import(configPath);
         databases = mod.default;
@@ -37,15 +37,22 @@ export async function runMigrate(rest: string[]) {
         process.exit(1);
     }
 
-    if (!Array.isArray(databases) || databases.length === 0) {
+    if (!databases || typeof databases !== 'object' || Object.keys(databases).length === 0) {
         console.error(chalk.red('\n  src/config/database.ts has no connections configured\n'));
         process.exit(1);
     }
 
     // ── Resolve target connection ─────────────────────────────────────────────
-    const config: any = connectionName === 'default'
-        ? (databases.find((d: any) => d.isDefault) ?? databases[0])
-        : databases.find((d: any) => d.name === connectionName);
+    const entries = Object.entries(databases);
+    let config: any;
+
+    if (connectionName === 'default') {
+        const defaultEntry = entries.find(([, v]) => v.isDefault);
+        config = defaultEntry ? defaultEntry[1] : entries[0][1];
+    } else {
+        const match = entries.find(([, v]) => v.name === connectionName);
+        config = match ? match[1] : undefined;
+    }
 
     if (!config) {
         console.error(chalk.red(`\n  Connection "${connectionName}" not found in src/config/database.ts\n`));
@@ -57,7 +64,7 @@ export async function runMigrate(rest: string[]) {
     if (!SQL_DRIVERS.has(driver)) {
         console.error(chalk.red(
             `\n  Driver "${driver}" does not support .sql migrations.\n` +
-            `  Supported: mysql, mariadb, postgres, mssql\n`,
+            `  Supported: mysql, mariadb, postgres, mssql, sqlite\n`,
         ));
         process.exit(1);
     }
@@ -70,84 +77,12 @@ export async function runMigrate(rest: string[]) {
         process.exit(1);
     }
 
-    // ── Delegate to a temp script inside the target project ───────────────────
-    // Written into the target cwd so Bun resolves `sequelize` from that
-    // project's own node_modules.
+    // ── Build the temp migration script for the target project ──────────────
     const connectionJson = JSON.stringify({ ...config.connection });
     const migrationsDirJson = JSON.stringify(migrationsDir);
     const configName = config.name as string;
 
-    const tmpScript = `
-import { Sequelize, DataTypes, QueryTypes } from 'sequelize';
-import fs from 'fs';
-import path from 'path';
-
-const sequelize = new Sequelize({
-    dialect: ${JSON.stringify(driver)},
-    ...${connectionJson},
-    logging: false,
-});
-
-try {
-    await sequelize.authenticate();
-} catch (err) {
-    console.error('Cannot connect to ${configName} (${driver}):', err instanceof Error ? err.message : err);
-    process.exit(1);
-}
-
-// Ensure migrations table exists
-const qi = sequelize.getQueryInterface();
-await qi.createTable(
-    'migrations',
-    {
-        id:        { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true, allowNull: false },
-        batch:     { type: DataTypes.INTEGER, allowNull: false },
-        name:      { type: DataTypes.STRING,  allowNull: false },
-        timestamp: { type: DataTypes.DATE,    allowNull: false },
-    },
-    { ifNotExists: true },
-);
-
-// Fetch already-run migration names
-const ran = await sequelize.query(
-    'SELECT name FROM migrations',
-    { type: QueryTypes.SELECT },
-) as { name: string }[];
-const ranNames = new Set(ran.map(r => r.name));
-
-// Determine next batch number
-const batchRows = await sequelize.query(
-    'SELECT MAX(batch) AS maxbatch FROM migrations',
-    { type: QueryTypes.SELECT },
-) as Record<string, any>[];
-const nextBatch = (Number(batchRows[0]?.maxbatch ?? 0)) + 1;
-
-// Read, sort, and filter pending migrations
-const migrationsDir = ${migrationsDirJson};
-const files = fs.readdirSync(migrationsDir)
-    .filter(f => f.endsWith('.sql'))
-    .sort();
-const pending = files.filter(f => !ranNames.has(f));
-
-if (pending.length === 0) {
-    console.log('  Nothing to migrate — all migrations are up to date.');
-} else {
-    for (const file of pending) {
-        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
-        if (sql) {
-            await sequelize.query(sql);
-        }
-        await sequelize.query(
-            'INSERT INTO migrations (batch, name, timestamp) VALUES (:batch, :name, :ts)',
-            { replacements: { batch: nextBatch, name: file, ts: new Date() }, type: QueryTypes.INSERT },
-        );
-        console.log('  migrate  ' + file);
-    }
-    console.log('  Batch ' + nextBatch + ' complete — ' + pending.length + ' migration(s) ran.');
-}
-
-await sequelize.close();
-`;
+    const tmpScript = buildMigrationScript(driver, connectionJson, migrationsDirJson, configName);
 
     console.log();
     console.log(chalk.bold.cyan(`  Running migrations`) + chalk.gray(` → "${configName}" (${driver})`));
@@ -161,4 +96,225 @@ await sequelize.close();
     }
 
     console.log();
+}
+
+// ── Script builders per driver ──────────────────────────────────────────────
+
+function buildMigrationScript(
+    driver: string,
+    connectionJson: string,
+    migrationsDirJson: string,
+    configName: string,
+): string {
+    switch (driver) {
+        case 'postgres':
+            return buildPostgresScript(connectionJson, migrationsDirJson, configName);
+        case 'mysql':
+        case 'mariadb':
+            return buildMysqlScript(connectionJson, migrationsDirJson, configName, driver);
+        case 'sqlite':
+            return buildSqliteScript(connectionJson, migrationsDirJson, configName);
+        case 'mssql':
+            return buildMssqlScript(connectionJson, migrationsDirJson, configName);
+        default:
+            throw new Error(`Unsupported driver: ${driver}`);
+    }
+}
+
+function buildPostgresScript(connectionJson: string, migrationsDirJson: string, configName: string): string {
+    return `
+import pg from 'pg';
+import fs from 'fs';
+import path from 'path';
+
+const client = new pg.Client(${connectionJson});
+try { await client.connect(); } catch (err) {
+    console.error('Cannot connect to ${configName} (postgres):', err instanceof Error ? err.message : err);
+    process.exit(1);
+}
+
+await client.query(\`
+    CREATE TABLE IF NOT EXISTS migrations (
+        id        SERIAL PRIMARY KEY,
+        batch     INTEGER NOT NULL,
+        name      VARCHAR(255) NOT NULL,
+        timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+\`);
+
+const ran = await client.query('SELECT name FROM migrations');
+const ranNames = new Set(ran.rows.map(r => r.name));
+
+const batchRes = await client.query('SELECT COALESCE(MAX(batch), 0) AS maxbatch FROM migrations');
+const nextBatch = Number(batchRes.rows[0].maxbatch) + 1;
+
+const migrationsDir = ${migrationsDirJson};
+const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
+const pending = files.filter(f => !ranNames.has(f));
+
+if (pending.length === 0) {
+    console.log('  Nothing to migrate — all migrations are up to date.');
+} else {
+    for (const file of pending) {
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
+        if (sql) await client.query(sql);
+        await client.query(
+            'INSERT INTO migrations (batch, name, timestamp) VALUES ($1, $2, $3)',
+            [nextBatch, file, new Date()]
+        );
+        console.log('  migrate  ' + file);
+    }
+    console.log('  Batch ' + nextBatch + ' complete — ' + pending.length + ' migration(s) ran.');
+}
+
+await client.end();
+`;
+}
+
+function buildMysqlScript(connectionJson: string, migrationsDirJson: string, configName: string, driver: string): string {
+    return `
+import mysql from 'mysql2/promise';
+import fs from 'fs';
+import path from 'path';
+
+let conn;
+try { conn = await mysql.createConnection(${connectionJson}); } catch (err) {
+    console.error('Cannot connect to ${configName} (${driver}):', err instanceof Error ? err.message : err);
+    process.exit(1);
+}
+
+await conn.execute(\`
+    CREATE TABLE IF NOT EXISTS migrations (
+        id        INT AUTO_INCREMENT PRIMARY KEY,
+        batch     INT NOT NULL,
+        name      VARCHAR(255) NOT NULL,
+        timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+\`);
+
+const [ran] = await conn.execute('SELECT name FROM migrations');
+const ranNames = new Set((ran as any[]).map(r => r.name));
+
+const [batchRows] = await conn.execute('SELECT COALESCE(MAX(batch), 0) AS maxbatch FROM migrations');
+const nextBatch = Number((batchRows as any[])[0].maxbatch) + 1;
+
+const migrationsDir = ${migrationsDirJson};
+const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
+const pending = files.filter(f => !ranNames.has(f));
+
+if (pending.length === 0) {
+    console.log('  Nothing to migrate — all migrations are up to date.');
+} else {
+    for (const file of pending) {
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
+        if (sql) await conn.execute(sql);
+        await conn.execute(
+            'INSERT INTO migrations (batch, name, timestamp) VALUES (?, ?, ?)',
+            [nextBatch, file, new Date()]
+        );
+        console.log('  migrate  ' + file);
+    }
+    console.log('  Batch ' + nextBatch + ' complete — ' + pending.length + ' migration(s) ran.');
+}
+
+await conn.end();
+`;
+}
+
+function buildSqliteScript(connectionJson: string, migrationsDirJson: string, configName: string): string {
+    return `
+import { Database } from 'bun:sqlite';
+import fs from 'fs';
+import path from 'path';
+
+const connOpts = ${connectionJson};
+const db = new Database(connOpts.storage || ':memory:');
+
+db.run(\`
+    CREATE TABLE IF NOT EXISTS migrations (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch     INTEGER NOT NULL,
+        name      TEXT NOT NULL,
+        timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+\`);
+
+const ran = db.prepare('SELECT name FROM migrations').all() as { name: string }[];
+const ranNames = new Set(ran.map(r => r.name));
+
+const batchRow = db.prepare('SELECT COALESCE(MAX(batch), 0) AS maxbatch FROM migrations').get() as any;
+const nextBatch = Number(batchRow.maxbatch) + 1;
+
+const migrationsDir = ${migrationsDirJson};
+const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
+const pending = files.filter(f => !ranNames.has(f));
+
+if (pending.length === 0) {
+    console.log('  Nothing to migrate — all migrations are up to date.');
+} else {
+    for (const file of pending) {
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
+        if (sql) db.run(sql);
+        db.prepare('INSERT INTO migrations (batch, name, timestamp) VALUES (?, ?, ?)').run(
+            nextBatch, file, new Date().toISOString()
+        );
+        console.log('  migrate  ' + file);
+    }
+    console.log('  Batch ' + nextBatch + ' complete — ' + pending.length + ' migration(s) ran.');
+}
+
+db.close();
+`;
+}
+
+function buildMssqlScript(connectionJson: string, migrationsDirJson: string, configName: string): string {
+    return `
+import mssql from 'mssql';
+import fs from 'fs';
+import path from 'path';
+
+let pool;
+try { pool = await mssql.connect(${connectionJson}); } catch (err) {
+    console.error('Cannot connect to ${configName} (mssql):', err instanceof Error ? err.message : err);
+    process.exit(1);
+}
+
+await pool.request().query(\`
+    IF OBJECT_ID('migrations', 'U') IS NULL
+    CREATE TABLE migrations (
+        id        INT IDENTITY(1,1) PRIMARY KEY,
+        batch     INT NOT NULL,
+        name      NVARCHAR(255) NOT NULL,
+        timestamp DATETIME2 NOT NULL DEFAULT GETUTCDATE()
+    )
+\`);
+
+const ran = await pool.request().query('SELECT name FROM migrations');
+const ranNames = new Set(ran.recordset.map(r => r.name));
+
+const batchRes = await pool.request().query('SELECT COALESCE(MAX(batch), 0) AS maxbatch FROM migrations');
+const nextBatch = Number(batchRes.recordset[0].maxbatch) + 1;
+
+const migrationsDir = ${migrationsDirJson};
+const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
+const pending = files.filter(f => !ranNames.has(f));
+
+if (pending.length === 0) {
+    console.log('  Nothing to migrate — all migrations are up to date.');
+} else {
+    for (const file of pending) {
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
+        if (sql) await pool.request().query(sql);
+        await pool.request()
+            .input('batch', mssql.Int, nextBatch)
+            .input('name', mssql.NVarChar, file)
+            .input('ts', mssql.DateTime2, new Date())
+            .query('INSERT INTO migrations (batch, name, timestamp) VALUES (@batch, @name, @ts)');
+        console.log('  migrate  ' + file);
+    }
+    console.log('  Batch ' + nextBatch + ' complete — ' + pending.length + ' migration(s) ran.');
+}
+
+await pool.close();
+`;
 }

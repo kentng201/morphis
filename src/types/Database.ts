@@ -34,22 +34,12 @@ export interface SqliteConnection {
     storage: string;
 }
 
-export interface SnowflakeConnection {
-    account: string;
-    username: string;
-    password: string;
-    database: string;
-    warehouse: string;
-    schema?: string;
-}
-
 export type DatabaseConfig =
     | { isDefault?: boolean; driver: 'mariadb'; connection: MariadbConnection }
     | { isDefault?: boolean; driver: 'mysql'; connection: MysqlConnection }
     | { isDefault?: boolean; driver: 'mssql'; connection: MssqlConnection }
     | { isDefault?: boolean; driver: 'postgres'; connection: PostgresConnection }
-    | { isDefault?: boolean; driver: 'sqlite'; connection: SqliteConnection }
-    | { isDefault?: boolean; driver: 'snowflake'; connection: SnowflakeConnection };
+    | { isDefault?: boolean; driver: 'sqlite'; connection: SqliteConnection };
 
 /**
  * Define a database configuration map with literal key inference, preventing

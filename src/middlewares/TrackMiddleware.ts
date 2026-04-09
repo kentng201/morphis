@@ -64,7 +64,33 @@ export class TrackMiddleware extends Middleware {
             res = await next(req);
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
-            this.loggerService.error(`Error: ${message}\nStack: ${err instanceof Error ? err.stack?.split('\n').join('\t\t\t\n') : 'No stack trace available'}`);
+            const errName = err instanceof Error && err.name && err.name !== 'Error' ? ` [${err.name}]` : '';
+
+            const extras: string[] = [];
+            if (err instanceof Error) {
+                const e = err as any;
+                // Nested validation error items (e.g. ORM validation errors)
+                if (Array.isArray(e.errors) && e.errors.length > 0) {
+                    const items = e.errors.map((ve: any) => {
+                        const field = ve.path ?? ve.field ?? ve.property ?? '?';
+                        const msg = ve.message ?? String(ve);
+                        return `${field}: ${msg}`;
+                    });
+                    extras.push(`Errors: ${items.join('; ')}`);
+                }
+                // Field map (e.g. unique constraint fields)
+                if (e.fields && typeof e.fields === 'object' && !Array.isArray(e.fields)) {
+                    extras.push(`Fields: ${JSON.stringify(e.fields)}`);
+                }
+                // Underlying DB / cause error
+                const cause: unknown = e.parent ?? e.cause ?? e.original;
+                if (cause instanceof Error) {
+                    extras.push(`Cause: ${cause.message}`);
+                }
+            }
+
+            const detail = extras.length > 0 ? `\n  ${extras.join('\n  ')}` : '';
+            this.loggerService.error(`Error${errName}: ${message}${detail}\nStack: ${err instanceof Error ? err.stack?.split('\n').join('\t\t\t\n') : 'No stack trace available'}`);
             return withTrackId(Response.json({ error: message }, { status: 500 }));
         }
         delete current.trackId;

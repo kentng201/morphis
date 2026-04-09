@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { runInProject } from '../utils/spawnInProject';
 
-/** Drivers that support table introspection via Sequelize */
+/** Drivers that support table introspection */
 const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite']);
 
 /** Convert PascalCase / camelCase → snake_case */
@@ -24,21 +24,111 @@ function pluralize(word: string): string {
 function sqlTypeToTs(sqlType: string): string {
     const t = sqlType.toUpperCase();
     if (/^TINYINT\(1\)/.test(t)) return 'boolean';
-    if (/^(INT|INTEGER|BIGINT|SMALLINT|TINYINT|MEDIUMINT)/.test(t)) return 'number';
+    if (/^(INT|INTEGER|BIGINT|SMALLINT|TINYINT|MEDIUMINT|SERIAL|BIGSERIAL)/.test(t)) return 'number';
     if (/^(FLOAT|DOUBLE|DECIMAL|NUMERIC|REAL)/.test(t)) return 'number';
     if (/^(BOOLEAN|BOOL)/.test(t)) return 'boolean';
-    if (/^(VARCHAR|TEXT|TINYTEXT|MEDIUMTEXT|LONGTEXT|CHAR|STRING|NVARCHAR)/.test(t)) return 'string';
+    if (/^(VARCHAR|TEXT|TINYTEXT|MEDIUMTEXT|LONGTEXT|CHAR|STRING|NVARCHAR|CHARACTER VARYING)/.test(t)) return 'string';
     if (/^(DATE|DATETIME|TIMESTAMP|TIME)/.test(t)) return 'Date';
     if (/^(JSON|JSONB)/.test(t)) return 'Record<string, any>';
-    if (/^(BLOB|VARBINARY|BINARY)/.test(t)) return 'Buffer';
+    if (/^(BLOB|VARBINARY|BINARY|BYTEA)/.test(t)) return 'Buffer';
     return 'any';
+}
+
+/** Map a SQL column type to a Drizzle column builder expression string */
+function sqlTypeToDrizzle(driver: string, colName: string, sqlType: string, isPk: boolean, isNullable: boolean, defaultVal: string | null): string {
+    const t = sqlType.toUpperCase();
+    let expr: string;
+
+    if (/^(SERIAL)/.test(t) && (driver === 'postgres')) {
+        expr = `serial('${colName}')`;
+    } else if (/^(BIGSERIAL)/.test(t) && (driver === 'postgres')) {
+        expr = `bigserial('${colName}', { mode: 'number' })`;
+    } else if (/^TINYINT\(1\)/.test(t)) {
+        expr = `boolean('${colName}')`;
+    } else if (/^(BIGINT|INT8)/.test(t)) {
+        expr = `bigint('${colName}', { mode: 'number' })`;
+    } else if (/^(INT|INTEGER|INT4|SMALLINT|INT2|TINYINT|MEDIUMINT)/.test(t)) {
+        expr = `integer('${colName}')`;
+    } else if (/^(BOOLEAN|BOOL)/.test(t)) {
+        expr = `boolean('${colName}')`;
+    } else if (/^(FLOAT|REAL)/.test(t)) {
+        expr = `real('${colName}')`;
+    } else if (/^(DOUBLE|DECIMAL|NUMERIC|DOUBLE PRECISION)/.test(t)) {
+        expr = `doublePrecision('${colName}')`;
+    } else if (/^(TEXT|TINYTEXT|MEDIUMTEXT|LONGTEXT)/.test(t)) {
+        expr = `text('${colName}')`;
+    } else if (/^(VARCHAR|CHARACTER VARYING|CHAR|NVARCHAR)/.test(t)) {
+        const match = sqlType.match(/\((\d+)\)/);
+        expr = match ? `varchar('${colName}', { length: ${match[1]} })` : `varchar('${colName}')`;
+    } else if (/^JSONB/.test(t)) {
+        expr = `jsonb('${colName}')`;
+    } else if (/^JSON/.test(t)) {
+        expr = `json('${colName}')`;
+    } else if (/^(TIMESTAMP WITHOUT TIME ZONE|TIMESTAMP|DATETIME)/.test(t)) {
+        expr = `timestamp('${colName}')`;
+    } else if (/^(DATE)/.test(t)) {
+        expr = `date('${colName}')`;
+    } else if (/^(TIME)/.test(t)) {
+        expr = `time('${colName}')`;
+    } else {
+        expr = `text('${colName}')`;
+    }
+
+    if (isPk) expr += '.primaryKey()';
+    if (!isNullable && !isPk) expr += '.notNull()';
+
+    if (defaultVal) {
+        const dv = defaultVal.trim();
+        if (/^(CURRENT_TIMESTAMP|NOW\(\))/i.test(dv)) {
+            expr += '.defaultNow()';
+        } else if (/^nextval\(/i.test(dv)) {
+            // serial/autoincrement — skip default
+        } else if (/^'.*'$/.test(dv)) {
+            expr += `.default(${dv})`;
+        } else if (/^\d+(\.\d+)?$/.test(dv)) {
+            expr += `.default(${dv})`;
+        }
+    }
+
+    return expr;
+}
+
+/** Get Drizzle core import path for a driver */
+function drizzleCoreModule(driver: string): string {
+    switch (driver) {
+        case 'postgres': return 'drizzle-orm/pg-core';
+        case 'mysql':
+        case 'mariadb': return 'drizzle-orm/mysql-core';
+        case 'sqlite': return 'drizzle-orm/sqlite-core';
+        case 'mssql': return 'drizzle-orm/mssql-core';
+        default: return 'drizzle-orm/pg-core';
+    }
+}
+
+/** Get table builder function name for a driver */
+function tableBuilderName(driver: string): string {
+    switch (driver) {
+        case 'postgres': return 'pgTable';
+        case 'mysql':
+        case 'mariadb': return 'mysqlTable';
+        case 'sqlite': return 'sqliteTable';
+        case 'mssql': return 'mssqlTable';
+        default: return 'pgTable';
+    }
 }
 
 /**
  * Regex that matches the declare fields block inside a model class.
- * Captures everything between the last static property line and the closing `}`.
  */
 const DECLARE_BLOCK_RE = /(\n[ \t]*declare\s[^\n]+)+/g;
+
+type IntrospectedColumn = {
+    name: string;
+    type: string;
+    nullable: boolean;
+    primaryKey: boolean;
+    defaultValue: string | null;
+};
 
 export async function runSyncModel(rest: string[]) {
     const cwd = process.cwd();
@@ -124,47 +214,160 @@ export async function runSyncModel(rest: string[]) {
     );
     console.log();
 
-    // ── Introspect DB ─────────────────────────────────────────────────────────
-    type ColumnMeta = { type: string; allowNull: boolean; primaryKey: boolean; defaultValue: any };
-    let columns: Record<string, ColumnMeta> = {};
+    // ── Introspect DB via raw driver client ───────────────────────────────────
+    let introspectedColumns: IntrospectedColumn[] = [];
 
     const outputFile = path.join(cwd, '.__morphis_columns.json');
     const connectionJson = JSON.stringify({ ...config.connection });
 
-    const introspectScript = `
-import { Sequelize } from 'sequelize';
+    let introspectScript: string;
+
+    if (driver === 'postgres') {
+        introspectScript = `
+import pg from 'pg';
 import fs from 'fs';
 
-const sequelize = new Sequelize({
-    dialect: ${JSON.stringify(driver)},
-    ...${connectionJson},
-    logging: false,
+const client = new pg.Client({
+    host: ${JSON.stringify(config.connection.host)},
+    port: ${JSON.stringify(config.connection.port ?? 5432)},
+    database: ${JSON.stringify(config.connection.database)},
+    user: ${JSON.stringify(config.connection.username)},
+    password: ${JSON.stringify(config.connection.password)},
+});
+await client.connect();
+
+try {
+    const result = await client.query(
+        \`SELECT column_name, data_type, udt_name, is_nullable, column_default, character_maximum_length,
+                (SELECT COUNT(*) > 0 FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+                    WHERE tc.table_name = c.table_name AND kcu.column_name = c.column_name
+                    AND tc.constraint_type = 'PRIMARY KEY') AS is_pk
+         FROM information_schema.columns c
+         WHERE table_name = $1
+         ORDER BY ordinal_position\`,
+        [${JSON.stringify(tableName)}],
+    );
+    const cols = result.rows.map(r => ({
+        name: r.column_name,
+        type: r.character_maximum_length ? r.data_type + '(' + r.character_maximum_length + ')' : r.data_type,
+        nullable: r.is_nullable === 'YES',
+        primaryKey: r.is_pk === true || r.is_pk === 't',
+        defaultValue: r.column_default ?? null,
+    }));
+    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify(cols));
+} catch {
+    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify([]));
+}
+await client.end();
+`;
+    } else if (driver === 'mysql' || driver === 'mariadb') {
+        introspectScript = `
+import mysql from 'mysql2/promise';
+import fs from 'fs';
+
+const connection = await mysql.createConnection({
+    host: ${JSON.stringify(config.connection.host)},
+    port: ${JSON.stringify(config.connection.port ?? 3306)},
+    database: ${JSON.stringify(config.connection.database)},
+    user: ${JSON.stringify(config.connection.username)},
+    password: ${JSON.stringify(config.connection.password)},
 });
 
 try {
-    await sequelize.authenticate();
-    const qi = sequelize.getQueryInterface();
-    const desc = await qi.describeTable(${JSON.stringify(tableName)});
-    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify(desc));
+    const [rows] = await connection.query(
+        'SELECT column_name, data_type, is_nullable, column_default, column_key, character_maximum_length FROM information_schema.columns WHERE table_name = ? AND table_schema = DATABASE() ORDER BY ordinal_position',
+        [${JSON.stringify(tableName)}],
+    );
+    const cols = rows.map(r => ({
+        name: r.COLUMN_NAME ?? r.column_name,
+        type: r.CHARACTER_MAXIMUM_LENGTH ? (r.DATA_TYPE ?? r.data_type) + '(' + (r.CHARACTER_MAXIMUM_LENGTH ?? r.character_maximum_length) + ')' : (r.DATA_TYPE ?? r.data_type),
+        nullable: (r.IS_NULLABLE ?? r.is_nullable) === 'YES',
+        primaryKey: (r.COLUMN_KEY ?? r.column_key) === 'PRI',
+        defaultValue: r.COLUMN_DEFAULT ?? r.column_default ?? null,
+    }));
+    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify(cols));
 } catch {
-    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify({}));
+    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify([]));
 }
-await sequelize.close();
+await connection.end();
 `;
+    } else if (driver === 'sqlite') {
+        introspectScript = `
+import { Database } from 'bun:sqlite';
+import fs from 'fs';
+
+const db = new Database(${JSON.stringify(config.connection.storage)});
+try {
+    const rows = db.query('PRAGMA table_info(${tableName})').all();
+    const cols = rows.map(r => ({
+        name: r.name,
+        type: r.type,
+        nullable: r.notnull === 0,
+        primaryKey: r.pk === 1,
+        defaultValue: r.dflt_value,
+    }));
+    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify(cols));
+} catch {
+    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify([]));
+}
+db.close();
+`;
+    } else {
+        // mssql
+        introspectScript = `
+import mssql from 'mssql';
+import fs from 'fs';
+
+const pool = await new mssql.ConnectionPool({
+    server: ${JSON.stringify(config.connection.host)},
+    port: ${JSON.stringify(config.connection.port ?? 1433)},
+    database: ${JSON.stringify(config.connection.database)},
+    user: ${JSON.stringify(config.connection.username)},
+    password: ${JSON.stringify(config.connection.password)},
+    options: { encrypt: false, trustServerCertificate: true },
+}).connect();
+
+try {
+    const result = await pool.query(
+        \`SELECT column_name, data_type, is_nullable, column_default,
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+                    WHERE tc.table_name = c.table_name AND kcu.column_name = c.column_name
+                    AND tc.constraint_type = 'PRIMARY KEY'
+                ) THEN 1 ELSE 0 END AS is_pk
+         FROM information_schema.columns c
+         WHERE table_name = '${tableName}'
+         ORDER BY ordinal_position\`,
+    );
+    const cols = result.recordset.map(r => ({
+        name: r.column_name,
+        type: r.data_type,
+        nullable: r.is_nullable === 'YES',
+        primaryKey: r.is_pk === 1,
+        defaultValue: r.column_default ?? null,
+    }));
+    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify(cols));
+} catch {
+    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify([]));
+}
+await pool.close();
+`;
+    }
 
     try {
         await runInProject(cwd, introspectScript);
         if (fs.existsSync(outputFile)) {
             const raw = fs.readFileSync(outputFile, 'utf8');
-            columns = JSON.parse(raw);
+            introspectedColumns = JSON.parse(raw);
             fs.unlinkSync(outputFile);
         }
     } catch {
         // Introspection failed — columns stays empty
     }
 
-    const columnEntries = Object.entries(columns);
-    if (columnEntries.length === 0) {
+    if (introspectedColumns.length === 0) {
         console.error(chalk.red(
             `\n  Table "${tableName}" not found or returned no columns.\n` +
             `  Run ${chalk.cyan('morphis new:migration')} and ${chalk.cyan('morphis migrate')} first.\n`,
@@ -173,20 +376,78 @@ await sequelize.close();
     }
 
     // ── Build new declare fields ──────────────────────────────────────────────
-    const fields = columnEntries.map(([colName, meta]) => {
-        const propName = colName.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
-        const tsType = sqlTypeToTs(String(meta.type));
-        const nullable = meta.allowNull ? ' | null' : '';
+    const fields = introspectedColumns.map((col) => {
+        const propName = col.name.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+        const tsType = sqlTypeToTs(String(col.type));
+        const nullable = col.nullable ? ' | null' : '';
         return `    declare ${propName}: ${tsType}${nullable};`;
     });
 
     const declareBlock = '\n\n' + fields.join('\n');
+
+    // ── Generate .schema.ts file ──────────────────────────────────────────────
+    const schemaFile = path.join(cwd, 'src', 'models', `${modelName}.schema.ts`);
+    const coreModule = drizzleCoreModule(driver);
+    const builderName = tableBuilderName(driver);
+    const tableVarName = `${toSnakeCase(modelName)}sTable`;
+
+    // Collect unique Drizzle column builder names used
+    const usedBuilders = new Set<string>();
+    usedBuilders.add(builderName);
+
+    const columnLines = introspectedColumns.map((col) => {
+        const drizzleExpr = sqlTypeToDrizzle(driver, col.name, col.type, col.primaryKey, col.nullable, col.defaultValue);
+        // Extract builder function name (e.g. "integer" from "integer('id')")
+        const match = drizzleExpr.match(/^(\w+)\(/);
+        if (match) usedBuilders.add(match[1]);
+        return `    ${col.name}: ${drizzleExpr},`;
+    });
+
+    const imports = Array.from(usedBuilders).sort();
+    const schemaContent = [
+        `// GENERATED FILE — do not edit. Re-generate with: morphis sync:model ${modelName}`,
+        `import { ${imports.join(', ')} } from '${coreModule}';`,
+        ``,
+        `export const ${tableVarName} = ${builderName}('${tableName}', {`,
+        ...columnLines,
+        `});`,
+        ``,
+    ].join('\n');
+
+    fs.writeFileSync(schemaFile, schemaContent);
+    console.log(chalk.gray(`    create src/models/${modelName}.schema.ts`));
 
     // ── Rewrite the model file ────────────────────────────────────────────────
     let content = fs.readFileSync(modelFile, 'utf8');
 
     // Remove existing declare lines (if any)
     content = content.replace(DECLARE_BLOCK_RE, '');
+
+    // Add schema import if not already present
+    const schemaImportLine = `import { ${tableVarName} } from './${modelName}.schema';`;
+    if (!content.includes(`./${modelName}.schema`)) {
+        // Insert after the last import line
+        const lastImportIdx = content.lastIndexOf('\nimport ');
+        if (lastImportIdx !== -1) {
+            const endOfLine = content.indexOf('\n', lastImportIdx + 1);
+            content = content.slice(0, endOfLine + 1) + schemaImportLine + '\n' + content.slice(endOfLine + 1);
+        } else {
+            content = schemaImportLine + '\n' + content;
+        }
+    }
+
+    // Add or update static schema property
+    if (!content.includes('static schema')) {
+        // Insert after the class opening brace, or after the first static property
+        const classBodyMatch = content.match(/extends Model\s*\{/);
+        if (classBodyMatch && classBodyMatch.index !== undefined) {
+            const insertPos = classBodyMatch.index + classBodyMatch[0].length;
+            content = content.slice(0, insertPos) + `\n    static schema = ${tableVarName};` + content.slice(insertPos);
+        }
+    } else {
+        // Update existing static schema line
+        content = content.replace(/static schema\s*=\s*[^;]+;/, `static schema = ${tableVarName};`);
+    }
 
     // Insert new declare block before the closing `}` of the class
     const lastBrace = content.lastIndexOf('\n}');
@@ -201,6 +462,7 @@ await sequelize.close();
     console.log(chalk.gray(`    update src/models/${modelName}.ts`));
     console.log();
     console.log(chalk.bold('  Model synced: ') + chalk.cyan(`src/models/${modelName}.ts`));
-    console.log(chalk.gray(`  ${columnEntries.length} column(s) mapped from table "${tableName}"`));
+    console.log(chalk.gray(`  ${introspectedColumns.length} column(s) mapped from table "${tableName}"`));
+    console.log(chalk.gray(`  Schema file: src/models/${modelName}.schema.ts`));
     console.log();
 }

@@ -2,8 +2,8 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 
-/** Drivers that use plain-SQL migrations. Snowflake and SQLite are excluded. */
-const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql']);
+/** Drivers that use plain-SQL migrations. */
+const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite']);
 
 /** Formats a Date as YYYYMMDDHHmmss */
 function formatTimestamp(d: Date): string {

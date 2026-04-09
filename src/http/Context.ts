@@ -39,11 +39,10 @@ export class Context {
     /** Full endpoint path set by LoggerMiddleware, e.g. /orders/42 */
     path?: string;
     /**
-     * Active Sequelize instance set by ConnectMiddleware / @Connect().
-     * Cast to your local `Sequelize` type for full autocompletion:
+     * Active Drizzle db instance set by ConnectMiddleware / @Connect().
+     * Use directly for raw Drizzle queries:
      * @example
-     * import type { Sequelize } from 'sequelize';
-     * const db = current.db as Sequelize;
+     * const posts = await current.db.select().from(Post.table);
      */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     db?: any;

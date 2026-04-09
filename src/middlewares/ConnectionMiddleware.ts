@@ -1,19 +1,45 @@
 import { Middleware } from '../http/Middleware';
 import type { Request } from '../http/types';
 import type { DatabaseConfig } from '../types/Database';
+import { ConnectionManager, type ConnectionEntry } from '../db/ConnectionManager';
 
 /**
  * Minimal interface covering what ConnectionMiddleware interacts with on a
- * Sequelize instance. The full Sequelize type is available in the consumer
- * project — cast `current.db` to `Sequelize` for typed model access.
+ * Drizzle db instance. The full Drizzle type is available in the consumer
+ * project — cast `current.db` for typed access.
  */
-export interface SequelizeLike {
-    authenticate(): Promise<void>;
-    close(): Promise<void>;
+export interface DrizzleLike {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    $client?: any;
 }
 
 /**
- * Global middleware that creates and manages Sequelize connections from your
+ * Ping a Drizzle db instance by executing a trivial query on the underlying
+ * client. Throws if the connection is not reachable.
+ */
+async function ping(entry: ConnectionEntry): Promise<void> {
+    const { db, driver } = entry;
+    switch (driver) {
+        case 'postgres':
+            await db.$client.query('SELECT 1');
+            break;
+        case 'mysql':
+        case 'mariadb':
+            await db.$client.pool.query('SELECT 1');
+            break;
+        case 'mssql':
+            await db.$client.query('SELECT 1');
+            break;
+        case 'sqlite':
+            db.$client.query('SELECT 1');
+            break;
+        default:
+            break;
+    }
+}
+
+/**
+ * Global middleware that creates and manages Drizzle connections from your
  * `src/config/database.ts` configuration.
  *
  * Register once at application startup:
@@ -22,14 +48,14 @@ export interface SequelizeLike {
  * import { ConnectionMiddleware } from 'morphis';
  *
  * const connections = new ConnectionMiddleware(databases);
- * await connections.initialize(); // authenticates all connections; throws on failure
+ * await connections.initialize(); // pings all connections; throws on failure
  * router.use(connections);
  *
  * Per-endpoint, use `Connect()` to make a connection available as `current.db`.
  */
 export class ConnectionMiddleware extends Middleware {
-    private static registry = new Map<string, SequelizeLike>();
-    /** Tracks which connection names have been successfully authenticated. */
+    private static registry = new Map<string, ConnectionEntry>();
+    /** Tracks which connection names have been successfully pinged. */
     static readonly authenticated = new Set<string>();
 
     constructor(private readonly config: Record<string, DatabaseConfig>) {
@@ -37,59 +63,42 @@ export class ConnectionMiddleware extends Middleware {
     }
 
     /**
-     * Creates a Sequelize instance for every database in the config and calls
-     * `authenticate()` on each to verify connectivity.
+     * Creates a Drizzle instance for every database in the config and pings
+     * each to verify connectivity.
      *
      * Throws with a descriptive message if:
-     * - sequelize is not installed in the consumer project
+     * - drizzle-orm or the database driver is not installed in the consumer project
      * - any connection cannot be established
      *
      * Call this once before starting Bun.serve().
      */
     async initialize(): Promise<void> {
-        // Use new Function to prevent TypeScript from statically resolving 'sequelize',
-        // which is intentionally not a dependency of morphis itself.
-        // eslint-disable-next-line @typescript-eslint/no-implied-eval
-        let SequelizeCtor: any;
-        try {
-            const dynamicImport = new Function('pkg', 'return import(pkg)');
-            // Resolve sequelize from the target project's cwd so that Sequelize's
-            // own dialect drivers (pg, mysql2, etc.) are resolved from the target
-            // project's node_modules rather than morphis's node_modules.
-            let sequelizePath: string;
-            try {
-                sequelizePath = require.resolve('sequelize', { paths: [process.cwd()] });
-            } catch {
-                sequelizePath = 'sequelize';
-            }
-            const mod = await dynamicImport(sequelizePath);
-            SequelizeCtor = mod.Sequelize ?? mod.default;
-        } catch {
-            throw new Error(
-                '[ConnectionMiddleware] sequelize is not installed in your project. Run: bun add sequelize',
-            );
-        }
-
         await Promise.all(
             Object.entries(this.config).map(async ([name, cfg]) => {
-                const instance: SequelizeLike = new SequelizeCtor({
-                    dialect: cfg.driver,
-                    ...cfg.connection,
-                    logging: false,
-                });
+                let entry: ConnectionEntry;
+                try {
+                    entry = await ConnectionManager.get(name);
+                } catch (err) {
+                    throw new Error(
+                        `[ConnectionMiddleware] Failed to create connection "${name}" (${cfg.driver}): ${err instanceof Error ? err.message : String(err)}. ` +
+                        `Make sure drizzle-orm and your database driver are installed. Run: bun add drizzle-orm`,
+                    );
+                }
 
-                await instance.authenticate().catch((err: unknown) => {
+                try {
+                    await ping(entry);
+                } catch (err) {
                     throw new Error(
                         `[ConnectionMiddleware] Failed to connect "${name}" (${cfg.driver}): ${err instanceof Error ? err.message : String(err)
                         }`,
                     );
-                });
+                }
 
-                ConnectionMiddleware.registry.set(name, instance);
+                ConnectionMiddleware.registry.set(name, entry);
                 ConnectionMiddleware.authenticated.add(name);
 
                 if (cfg.isDefault) {
-                    ConnectionMiddleware.registry.set('default', instance);
+                    ConnectionMiddleware.registry.set('default', entry);
                     ConnectionMiddleware.authenticated.add('default');
                 }
             }),
@@ -97,11 +106,11 @@ export class ConnectionMiddleware extends Middleware {
     }
 
     /**
-     * Retrieve a Sequelize instance by the connection name defined in your
+     * Retrieve a Drizzle connection entry by the connection name defined in your
      * database config. Returns `undefined` if the name is not registered or
      * `initialize()` has not been called yet.
      */
-    static get(name: string): SequelizeLike | undefined {
+    static get(name: string): ConnectionEntry | undefined {
         return ConnectionMiddleware.registry.get(name);
     }
 

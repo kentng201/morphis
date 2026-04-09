@@ -38,7 +38,7 @@ export async function runNewConnection(_rest: string[]) {
 
     console.log();
 
-    // ── Update package.json with missing sequelize deps ───────────────────────
+    // ── Update package.json with missing drizzle/driver deps ────────────────
     const pkgPath = path.join(cwd, 'package.json');
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
     const existingDeps: Record<string, string> = {

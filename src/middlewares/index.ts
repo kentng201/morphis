@@ -6,5 +6,5 @@ export { LoggerMiddleware, Logger } from './LoggerMiddleware';
 export { TrackMiddleware, Track } from './TrackMiddleware';
 export { CorsMiddleware, Cors } from './CorsMiddleware';
 export { ConnectionMiddleware } from './ConnectionMiddleware';
-export type { SequelizeLike } from './ConnectionMiddleware';
+export type { DrizzleLike } from './ConnectionMiddleware';
 export { ConnectMiddleware, Connect } from './ConnectMiddleware';

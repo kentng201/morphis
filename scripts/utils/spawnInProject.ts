@@ -5,7 +5,7 @@ import path from 'path';
 /**
  * Writes `script` as a temp `.ts` file inside `cwd` and runs it with `bun`.
  * Because the file lives in the target project's directory, Bun resolves
- * packages (e.g. sequelize) from that project's own node_modules.
+ * packages (e.g. pg, drizzle-orm) from that project's own node_modules.
  * The temp file is deleted on exit regardless of success or failure.
  */
 export function runInProject(cwd: string, script: string): Promise<void> {

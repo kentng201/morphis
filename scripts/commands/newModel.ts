@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { runInProject } from '../utils/spawnInProject';
 
-/** Drivers that support table introspection via Sequelize */
+/** Drivers that support table introspection */
 const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite']);
 
 /** Convert PascalCase / camelCase → snake_case */
@@ -121,27 +121,7 @@ export async function runNewModel(rest: string[]) {
         const outputFile = path.join(cwd, '.__morphis_columns.json');
         const connectionJson = JSON.stringify({ ...config.connection });
 
-        const introspectScript = `
-import { Sequelize } from 'sequelize';
-import fs from 'fs';
-
-const sequelize = new Sequelize({
-    dialect: ${JSON.stringify(driver)},
-    ...${connectionJson},
-    logging: false,
-});
-
-try {
-    await sequelize.authenticate();
-    const qi = sequelize.getQueryInterface();
-    const desc = await qi.describeTable(${JSON.stringify(tableName)});
-    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify(desc));
-} catch {
-    // Table does not exist yet or connection failed — write empty result
-    fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify({}));
-}
-await sequelize.close();
-`;
+        const introspectScript = buildIntrospectScript(driver, connectionJson, tableName, outputFile);
 
         try {
             await runInProject(cwd, introspectScript);
@@ -217,4 +197,120 @@ await sequelize.close();
         console.log(chalk.gray(`  Run ${chalk.cyan('morphis new:migration')} and ${chalk.cyan('morphis migrate')} first, then run ${chalk.cyan(`morphis sync:model ${modelName}`)}.`));
     }
     console.log();
+}
+
+// ── Per-driver introspection scripts ────────────────────────────────────────
+
+function buildIntrospectScript(driver: string, connectionJson: string, tableName: string, outputFile: string): string {
+    const tableJson = JSON.stringify(tableName);
+    const outJson = JSON.stringify(outputFile);
+
+    switch (driver) {
+        case 'postgres':
+            return `
+import pg from 'pg';
+import fs from 'fs';
+const client = new pg.Client(${connectionJson});
+try {
+    await client.connect();
+    const res = await client.query(
+        \`SELECT column_name, data_type, is_nullable, column_default,
+                (SELECT COUNT(*) FROM information_schema.key_column_usage k
+                 JOIN information_schema.table_constraints tc ON k.constraint_name = tc.constraint_name
+                 WHERE tc.constraint_type = 'PRIMARY KEY' AND k.column_name = c.column_name AND k.table_name = c.table_name) AS is_pk
+         FROM information_schema.columns c WHERE table_name = \${tableJson}\`
+    );
+    const cols = {};
+    for (const r of res.rows) {
+        cols[r.column_name] = {
+            type: r.data_type.toUpperCase(),
+            allowNull: r.is_nullable === 'YES',
+            primaryKey: Number(r.is_pk) > 0,
+            defaultValue: r.column_default,
+        };
+    }
+    fs.writeFileSync(${outJson}, JSON.stringify(cols));
+} catch { fs.writeFileSync(${outJson}, JSON.stringify({})); }
+await client.end();
+`;
+
+        case 'mysql':
+        case 'mariadb':
+            return `
+import mysql from 'mysql2/promise';
+import fs from 'fs';
+const conn = await mysql.createConnection(${connectionJson});
+try {
+    const [rows] = await conn.execute(
+        \`SELECT column_name, column_type, is_nullable, column_default, column_key
+         FROM information_schema.columns WHERE table_name = ${tableJson} AND table_schema = DATABASE()\`
+    );
+    const cols = {};
+    for (const r of rows) {
+        cols[r.COLUMN_NAME || r.column_name] = {
+            type: (r.COLUMN_TYPE || r.column_type || '').toUpperCase(),
+            allowNull: (r.IS_NULLABLE || r.is_nullable) === 'YES',
+            primaryKey: (r.COLUMN_KEY || r.column_key) === 'PRI',
+            defaultValue: r.COLUMN_DEFAULT || r.column_default,
+        };
+    }
+    fs.writeFileSync(${outJson}, JSON.stringify(cols));
+} catch { fs.writeFileSync(${outJson}, JSON.stringify({})); }
+await conn.end();
+`;
+
+        case 'sqlite':
+            return `
+import { Database } from 'bun:sqlite';
+import fs from 'fs';
+const connOpts = ${connectionJson};
+const db = new Database(connOpts.storage || ':memory:');
+try {
+    const rows = db.prepare('PRAGMA table_info(${tableName})').all();
+    const cols = {};
+    for (const r of rows) {
+        cols[r.name] = {
+            type: (r.type || 'TEXT').toUpperCase(),
+            allowNull: r.notnull === 0,
+            primaryKey: r.pk === 1,
+            defaultValue: r.dflt_value,
+        };
+    }
+    fs.writeFileSync(${outJson}, JSON.stringify(cols));
+} catch { fs.writeFileSync(${outJson}, JSON.stringify({})); }
+db.close();
+`;
+
+        case 'mssql':
+            return `
+import mssql from 'mssql';
+import fs from 'fs';
+try {
+    const pool = await mssql.connect(${connectionJson});
+    const res = await pool.request().query(
+        \`SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT,
+                CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS is_pk
+         FROM INFORMATION_SCHEMA.COLUMNS c
+         LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+           ON kcu.TABLE_NAME = c.TABLE_NAME AND kcu.COLUMN_NAME = c.COLUMN_NAME
+           AND kcu.CONSTRAINT_NAME IN (SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS WHERE CONSTRAINT_TYPE = 'PRIMARY KEY' AND TABLE_NAME = c.TABLE_NAME)
+         WHERE c.TABLE_NAME = ${tableJson}\`
+    );
+    const cols = {};
+    for (const r of res.recordset) {
+        cols[r.COLUMN_NAME] = {
+            type: r.DATA_TYPE.toUpperCase(),
+            allowNull: r.IS_NULLABLE === 'YES',
+            primaryKey: r.is_pk === 1,
+            defaultValue: r.COLUMN_DEFAULT,
+        };
+    }
+    fs.writeFileSync(${outJson}, JSON.stringify(cols));
+    await pool.close();
+} catch { fs.writeFileSync(${outJson}, JSON.stringify({})); }
+`;
+
+        default:
+            return `import fs from 'fs'; fs.writeFileSync(${outJson}, JSON.stringify({}));`;
+    }
 }

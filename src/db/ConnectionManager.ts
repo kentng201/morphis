@@ -1,20 +1,43 @@
 import path from 'path';
 
+export interface ConnectionEntry {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db: any;
+    driver: string;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const registry = new Map<string, any>();
+const registry = new Map<string, ConnectionEntry>();
 
 /**
- * Manages Sequelize instances keyed by connection name.
+ * Resolve a package from the target (consumer) project's node_modules,
+ * then dynamically import it. This ensures morphis never ships its own
+ * copy of drizzle-orm or any database driver.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function importFromProject(pkg: string): Promise<any> {
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    const dynamicImport = new Function('p', 'return import(p)');
+    let resolved: string;
+    try {
+        resolved = require.resolve(pkg, { paths: [process.cwd()] });
+    } catch {
+        resolved = pkg;
+    }
+    return dynamicImport(resolved);
+}
+
+/**
+ * Manages Drizzle ORM instances keyed by connection name.
  * Instances are lazily created and cached for the lifetime of the process.
  */
 export class ConnectionManager {
     /**
-     * Returns the cached Sequelize instance for the given connection name,
-     * creating it on first access by loading the consuming project's
-     * src/config/database.ts.
+     * Returns the cached Drizzle db instance (wrapped as `ConnectionEntry`)
+     * for the given connection name, creating it on first access by loading
+     * the consuming project's `src/config/database.ts`.
      */
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async get(connectionName: string): Promise<any> {
+    static async get(connectionName: string): Promise<ConnectionEntry> {
         if (registry.has(connectionName)) {
             return registry.get(connectionName)!;
         }
@@ -22,6 +45,7 @@ export class ConnectionManager {
         const cwd = process.cwd();
         const configPath = path.join(cwd, 'src', 'config', 'database.ts');
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let databases: Record<string, any>;
         try {
             const mod = await import(configPath);
@@ -37,6 +61,7 @@ export class ConnectionManager {
             throw new Error('src/config/database.ts has no connections configured');
         }
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const config: any = connectionName === 'default'
             ? (entries.find(([, d]) => d.isDefault)?.[1] ?? entries[0][1])
             : databases[connectionName];
@@ -45,43 +70,118 @@ export class ConnectionManager {
             throw new Error(`Connection "${connectionName}" not found in src/config/database.ts`);
         }
 
-        // Resolve sequelize from the target project's cwd so that dialect
-        // drivers (pg, mysql2, etc.) are resolved from the consumer's
-        // node_modules rather than morphis's own node_modules.
-        // eslint-disable-next-line @typescript-eslint/no-implied-eval
-        const dynamicImport = new Function('pkg', 'return import(pkg)');
-        let sequelizePath: string;
-        try {
-            sequelizePath = require.resolve('sequelize', { paths: [process.cwd()] });
-        } catch {
-            sequelizePath = 'sequelize';
-        }
-        const seqMod = await dynamicImport(sequelizePath);
-        const SequelizeCtor = seqMod.Sequelize ?? seqMod.default;
-        const instance = new SequelizeCtor({
-            dialect: config.driver,
-            ...config.connection,
-            logging: false,
-        });
-
-        registry.set(connectionName, instance);
-        return instance;
+        const entry = await ConnectionManager.createDrizzle(config);
+        registry.set(connectionName, entry);
+        return entry;
     }
 
-    /** Manually register a pre-built Sequelize instance (useful for testing). */
+    /**
+     * Create a Drizzle db instance from a DatabaseConfig entry.
+     * All imports are resolved from the consumer project's node_modules.
+     */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static set(connectionName: string, instance: any): void {
-        registry.set(connectionName, instance);
+    private static async createDrizzle(config: any): Promise<ConnectionEntry> {
+        const driver: string = config.driver;
+        const conn = config.connection;
+
+        switch (driver) {
+            case 'postgres': {
+                const pgMod = await importFromProject('pg');
+                const Pool = pgMod.Pool ?? pgMod.default?.Pool;
+                const pool = new Pool({
+                    host: conn.host,
+                    port: conn.port,
+                    database: conn.database,
+                    user: conn.username,
+                    password: conn.password,
+                });
+                const drizzleMod = await importFromProject('drizzle-orm/node-postgres');
+                const drizzle = drizzleMod.drizzle;
+                return { db: drizzle(pool), driver };
+            }
+
+            case 'mysql':
+            case 'mariadb': {
+                const mysql2Mod = await importFromProject('mysql2/promise');
+                const createPool = mysql2Mod.createPool ?? mysql2Mod.default?.createPool;
+                const pool = createPool({
+                    host: conn.host,
+                    port: conn.port,
+                    database: conn.database,
+                    user: conn.username,
+                    password: conn.password,
+                });
+                const drizzleMod = await importFromProject('drizzle-orm/mysql2');
+                const drizzle = drizzleMod.drizzle;
+                return { db: drizzle(pool), driver };
+            }
+
+            case 'sqlite': {
+                const sqliteMod = await importFromProject('bun:sqlite');
+                const Database = sqliteMod.Database ?? sqliteMod.default;
+                const database = new Database(conn.storage);
+                const drizzleMod = await importFromProject('drizzle-orm/bun-sqlite');
+                const drizzle = drizzleMod.drizzle;
+                return { db: drizzle(database), driver };
+            }
+
+            case 'mssql': {
+                console.warn(
+                    '[ConnectionManager] drizzle-orm/mssql is in preview and may be unstable.',
+                );
+                const mssqlMod = await importFromProject('mssql');
+                const mssql = mssqlMod.default ?? mssqlMod;
+                const pool = await new mssql.ConnectionPool({
+                    server: conn.host,
+                    port: conn.port,
+                    database: conn.database,
+                    user: conn.username,
+                    password: conn.password,
+                    options: { encrypt: false, trustServerCertificate: true },
+                }).connect();
+                const drizzleMod = await importFromProject('drizzle-orm/mssql');
+                const drizzle = drizzleMod.drizzle;
+                return { db: drizzle(pool), driver };
+            }
+
+            default:
+                throw new Error(`Unsupported database driver: "${driver}"`);
+        }
     }
 
-    /** Remove all cached instances. */
+    /** Manually register a pre-built connection entry (useful for testing). */
+    static set(connectionName: string, entry: ConnectionEntry): void {
+        registry.set(connectionName, entry);
+    }
+
+    /** Remove all cached entries. */
     static clear(): void {
         registry.clear();
     }
 
     /** Close all cached connections and clear the registry. */
     static async closeAll(): Promise<void> {
-        await Promise.all([...registry.values()].map(s => s.close()));
+        for (const { db, driver } of registry.values()) {
+            try {
+                switch (driver) {
+                    case 'postgres':
+                        await db.$client?.end?.();
+                        break;
+                    case 'mysql':
+                    case 'mariadb':
+                        await db.$client?.pool?.end?.();
+                        break;
+                    case 'mssql':
+                        await db.$client?.close?.();
+                        break;
+                    case 'sqlite':
+                        db.$client?.close?.();
+                        break;
+                }
+            } catch {
+                // best-effort close
+            }
+        }
         registry.clear();
     }
 }
