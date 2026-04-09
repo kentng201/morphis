@@ -3,13 +3,10 @@ import type { Request } from '../http/types';
 import { current } from '../http/Context';
 import { ConnectionMiddleware } from './ConnectionMiddleware';
 import { ConnectionManager } from '../db/ConnectionManager';
-import { LoggerService } from '../services';
 
 export class ConnectMiddleware extends Middleware {
     readonly _kind = 'connect' as const;
     readonly connectionName: string;
-
-    readonly loggerService = new LoggerService(ConnectMiddleware.name);
 
     constructor(name: string = 'default') {
         super();
