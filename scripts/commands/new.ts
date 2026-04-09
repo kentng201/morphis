@@ -79,6 +79,92 @@ export function buildConnectionEntry(driver: DbDriver, name: string, isDefault: 
     return lines.join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// Drizzle type helpers — maps DbDriver → import path + exported class name
+// ---------------------------------------------------------------------------
+
+interface DrizzleTypeEntry {
+    importPath: string;
+    typeName: string;
+    /** Driver literal(s) to match in the conditional type, e.g. "'mysql' | 'mariadb'" */
+    driverLiterals: string;
+}
+
+/** Registry keyed by importPath so mysql + mariadb share one import. */
+const DRIZZLE_IMPORT_MAP = new Map<string, DrizzleTypeEntry>([
+    ['drizzle-orm/node-postgres', { importPath: 'drizzle-orm/node-postgres', typeName: 'NodePgDatabase', driverLiterals: `'postgres'` }],
+    ['drizzle-orm/mysql2',        { importPath: 'drizzle-orm/mysql2',        typeName: 'MySql2Database',  driverLiterals: `'mysql' | 'mariadb'` }],
+    ['drizzle-orm/bun-sqlite',    { importPath: 'drizzle-orm/bun-sqlite',    typeName: 'BunSQLiteDatabase', driverLiterals: `'sqlite'` }],
+    // mssql is a drizzle-orm preview with no stable sub-path; falls back to any
+]);
+
+const DRIVER_TO_IMPORT_PATH: Partial<Record<DbDriver, string>> = {
+    postgres: 'drizzle-orm/node-postgres',
+    mysql:    'drizzle-orm/mysql2',
+    mariadb:  'drizzle-orm/mysql2',
+    sqlite:   'drizzle-orm/bun-sqlite',
+    // mssql intentionally omitted
+};
+
+/**
+ * Builds the content of `src/types/Context.d.ts` with correctly-typed db entries
+ * for the given set of drivers currently configured in `database.ts`.
+ *
+ * The emitted file uses `typeof databases` so the db key union stays in sync
+ * with the actual config without any regeneration on future connection changes.
+ */
+export function buildDbContextDts(drivers: DbDriver[]): string {
+    // Collect unique import entries (mysql + mariadb share one import)
+    const seen = new Map<string, DrizzleTypeEntry>();
+    for (const driver of drivers) {
+        const importPath = DRIVER_TO_IMPORT_PATH[driver];
+        if (importPath && !seen.has(importPath)) {
+            seen.set(importPath, DRIZZLE_IMPORT_MAP.get(importPath)!);
+        }
+    }
+
+    const entries = [...seen.values()];
+    const importLines = entries.map(e => `import type { ${e.typeName} } from '${e.importPath}';`);
+
+    // Build conditional type branches; mssql (and any unknown) fall through to any
+    const branches = entries.map(e => `    C extends { driver: ${e.driverLiterals} } ? ${e.typeName} :`);
+
+    return [
+        `import type databases from '../config/database';`,
+        ...importLines,
+        ``,
+        `// eslint-disable-next-line @typescript-eslint/no-explicit-any`,
+        `type DbFor<C extends { driver: string }> =`,
+        ...branches,
+        `    // eslint-disable-next-line @typescript-eslint/no-explicit-any`,
+        `    any;`,
+        ``,
+        `declare module 'morphis' {`,
+        `    interface Context {`,
+        `        db: { [K in keyof typeof databases]: DbFor<typeof databases[K]> | null };`,
+        `        // Add your custom context properties here`,
+        `    }`,
+        `}`,
+        ``,
+    ].join('\n');
+}
+
+/**
+ * Extracts the unique set of drivers from the content of a database.ts file
+ * using a simple regex. Used when regenerating Context.d.ts.
+ */
+export function parseDriversFromDatabaseFile(content: string): DbDriver[] {
+    const matches = content.matchAll(/driver:\s*'([^']+)'/g);
+    const drivers = new Set<DbDriver>();
+    for (const match of matches) {
+        const driver = match[1] as DbDriver;
+        if (DRIVER_TO_IMPORT_PATH[driver] !== undefined || driver === 'mssql') {
+            drivers.add(driver);
+        }
+    }
+    return [...drivers];
+}
+
 /**
  * Returns the full content of a src/config/database.ts file containing one entry.
  * Exported so newConnection.ts can create the file from scratch.
@@ -162,19 +248,7 @@ export async function runNew(rest: string[]) {
     }
 
     const contextDts = dbOption
-        ? [
-            `export { };`,
-            ``,
-            `declare module 'morphis' {`,
-            `    interface Context {`,
-            `        // db is set by @Connect() / Connect() — typed as Drizzle db instance.`,
-            `        db?: any;`,
-            `        // Add your custom context properties here`,
-            `        // userId?: number;`,
-            `    }`,
-            `}`,
-            ``,
-        ].join('\n')
+        ? buildDbContextDts([dbOption.driver])
         : [
             `export { };`,
             ``,

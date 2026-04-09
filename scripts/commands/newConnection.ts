@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import { selectOption, inputText } from '../utils/prompt';
-import { DB_OPTIONS, buildConnectionEntry, buildDatabaseFile } from './new';
+import { DB_OPTIONS, buildConnectionEntry, buildDatabaseFile, buildDbContextDts, parseDriversFromDatabaseFile } from './new';
 
 export async function runNewConnection(_rest: string[]) {
     const cwd = process.cwd();
@@ -75,6 +75,24 @@ export async function runNewConnection(_rest: string[]) {
         const updated = content.replace(marker, `\n${entry}${marker}`);
         fs.writeFileSync(configFile, updated);
         console.log(chalk.gray('    update src/config/database.ts'));
+    }
+
+    // ── Write / update src/types/Context.d.ts ───────────────────────────────
+    const typesDir = path.join(cwd, 'src', 'types');
+    const contextDtsPath = path.join(typesDir, 'Context.d.ts');
+
+    // Parse *all* drivers now present in database.ts (including the one just added)
+    const updatedDbContent = fs.readFileSync(configFile, 'utf8');
+    const allDrivers = parseDriversFromDatabaseFile(updatedDbContent);
+    const dbContextDts = buildDbContextDts(allDrivers);
+
+    if (!fs.existsSync(contextDtsPath)) {
+        fs.mkdirSync(typesDir, { recursive: true });
+        fs.writeFileSync(contextDtsPath, dbContextDts);
+        console.log(chalk.gray('    create src/types/Context.d.ts'));
+    } else {
+        fs.writeFileSync(contextDtsPath, dbContextDts);
+        console.log(chalk.gray('    update src/types/Context.d.ts'));
     }
 
     console.log();

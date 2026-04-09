@@ -35,7 +35,8 @@ export class ConnectMiddleware extends Middleware {
 
     /**
      * Resolves the named Drizzle connection on first use,
-     * sets `current.db` to the Drizzle db instance, then calls `next`.
+     * sets `current.db[connectionName]` to the Drizzle db instance, then calls `next`.
+     * Connections not resolved via Connect() return `null` when accessed on `current.db`.
      *
      * Returns a 503 JSON response if:
      * - The connection name is not registered (initialize() not called, or wrong name)
@@ -64,16 +65,17 @@ export class ConnectMiddleware extends Middleware {
         ConnectionMiddleware.authenticated.add(this.connectionName);
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (current as any).db = resolved.db;
+        (current as any).db[this.connectionName] = resolved.db;
         return next(req);
     }
 }
 
 /**
  * Per-endpoint middleware / method decorator that resolves a named database
- * connection and makes it available as `current.db` before the handler runs.
+ * connection and makes it available as `current.db[name]` before the handler runs.
  *
  * Defaults to the connection marked `isDefault: true` in your database config.
+ * Unresolved connections return `null` when accessed on `current.db`.
  *
  * Returns HTTP 503 if the connection is unavailable.
  *
@@ -81,14 +83,16 @@ export class ConnectMiddleware extends Middleware {
  * // Inline route — uses the default connection
  * router.get(handler, [Get('/orders'), Connect()]);
  *
- * // Inline route — named connection
- * router.get(handler, [Get('/orders'), Connect('analytics-db')]);
+ * // Inline route — multiple connections
+ * router.get(handler, [Get('/orders'), Connect('default'), Connect('mysql')]);
+ * // current.db['default'] and current.db['mysql'] are available;
+ * // current.db['mongo'] === null
  *
  * // Controller method decorator
  * \@Get('/orders')
  * \@Connect('default')
  * async list(req: Request) {
- *     const db = current.db; // Drizzle db instance
+ *     const db = current.db['default']; // Drizzle db instance
  *     return Order.findAll();
  * }
  */
