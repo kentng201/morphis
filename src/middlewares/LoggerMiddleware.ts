@@ -93,7 +93,10 @@ export class LoggerMiddleware extends Middleware {
      * that any `console.*` call made deeper in the stack can include it.
      */
     async handler(req: Request, next: (req: Request) => Promise<unknown>): Promise<unknown> {
-        current.path = req.path;
+        current.path = Object.entries(req.params).reduce(
+            (path, [key, value]) => path.replace(`:${key}`, value),
+            req.path,
+        );
         return next(req);
     }
 }
