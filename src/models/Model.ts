@@ -58,7 +58,9 @@ async function introspectPostgres(db: any, tableName: string): Promise<ColumnMet
         name: r.column_name,
         type: r.data_type,
         nullable: r.is_nullable === 'YES',
-        primaryKey: r.is_pk === true || r.is_pk === 't' || r.is_pk === '1',
+        primaryKey: String((r as Record<string, unknown>).is_pk) === 'true'
+            || r.is_pk === 't'
+            || r.is_pk === '1',
         defaultValue: r.column_default ?? null,
     }));
 }
@@ -225,6 +227,30 @@ export interface QueryOptions {
     offset?: number;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     orderBy?: any;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function normalizeWhere(table: any, where: unknown): Promise<any> {
+    if (!isPlainObject(where)) return where;
+
+    const drizzleMod = await importFromProject('drizzle-orm');
+    const { and, eq, isNull } = drizzleMod;
+    const predicates = Object.entries(where).map(([key, value]) => {
+        const column = table[key];
+        if (!column) {
+            throw new Error(`Unknown column "${key}" in where clause`);
+        }
+
+        return value === null ? isNull(column) : eq(column, value);
+    });
+
+    if (predicates.length === 0) return undefined;
+    if (predicates.length === 1) return predicates[0];
+    return and(...predicates);
 }
 
 // ── ModelInstance wrapper ──────────────────────────────────────────────────────
@@ -432,7 +458,8 @@ export class Model {
     static async findAll(this: any, options?: QueryOptions): Promise<ModelInstance[]> {
         await this.initialize();
         let query = this._drizzle.select().from(this.table);
-        if (options?.where) query = query.where(options.where);
+        const where = await normalizeWhere(this.table, options?.where);
+        if (where) query = query.where(where);
         if (options?.orderBy) query = query.orderBy(options.orderBy);
         if (options?.limit) query = query.limit(options.limit);
         if (options?.offset) query = query.offset(options.offset);
@@ -444,7 +471,8 @@ export class Model {
     static async findOne(this: any, options?: QueryOptions): Promise<ModelInstance | null> {
         await this.initialize();
         let query = this._drizzle.select().from(this.table);
-        if (options?.where) query = query.where(options.where);
+        const where = await normalizeWhere(this.table, options?.where);
+        if (where) query = query.where(where);
         if (options?.orderBy) query = query.orderBy(options.orderBy);
         query = query.limit(1);
         const rows = await query;
@@ -485,7 +513,8 @@ export class Model {
     static async update(this: any, values: Record<string, any>, options: Pick<QueryOptions, 'where'>): Promise<any[]> {
         await this.initialize();
         let query = this._drizzle.update(this.table).set(values);
-        if (options?.where) query = query.where(options.where);
+        const where = await normalizeWhere(this.table, options?.where);
+        if (where) query = query.where(where);
         const result = await query.returning();
         return result;
     }
@@ -494,7 +523,8 @@ export class Model {
     static async destroy(this: any, options: Pick<QueryOptions, 'where'>): Promise<any[]> {
         await this.initialize();
         let query = this._drizzle.delete(this.table);
-        if (options?.where) query = query.where(options.where);
+        const where = await normalizeWhere(this.table, options?.where);
+        if (where) query = query.where(where);
         const result = await query.returning();
         return result;
     }
@@ -506,7 +536,8 @@ export class Model {
         const { sql } = sqlMod;
 
         let query = this._drizzle.select({ count: sql`count(*)` }).from(this.table);
-        if (options?.where) query = query.where(options.where);
+        const where = await normalizeWhere(this.table, options?.where);
+        if (where) query = query.where(where);
         const rows = await query;
         return Number(rows[0]?.count ?? 0);
     }
