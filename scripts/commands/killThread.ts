@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import fs from 'fs';
-import path from 'path';
 import { execSync } from 'child_process';
+import { resolveEnvTarget } from '../utils/env';
 
 function getCmdline(pid: number): string {
     try {
@@ -20,38 +20,27 @@ function getCmdline(pid: number): string {
 }
 
 export function runKillThread(rest: string[]) {
-    const serverArg = rest.find(a => a.startsWith('--server='));
-    const envArg = rest.find(a => a.startsWith('--env=') || a.startsWith('--env-file='));
     const projectArg = rest.find(a => a.startsWith('--project='));
 
     const project = projectArg ? projectArg.split('=')[1] : null;
 
-    let server: string | null = null;
-
-    if (serverArg) {
-        server = serverArg.split('=')[1];
-    } else if (envArg) {
-        const envPath = envArg.split('=')[1];
-        const basename = path.basename(envPath);
-        const match = basename.match(/^\.env\.(.+)$/);
-        if (match) server = match[1];
-    }
-
-    if (!server) {
-        console.error(chalk.red('\n  Missing required option: --server=<name> or --env=.env.<name>'));
+    const target = resolveEnvTarget(rest, process.cwd());
+    if (!target) {
+        console.error(chalk.red('\n  Missing required option: --server=<name>, --env=<name>, or --env-file=.env.<name>'));
         process.exit(1);
     }
 
-    const envFile = path.join(process.cwd(), `.env.${server}`);
-    if (!fs.existsSync(envFile)) {
-        console.error(chalk.red(`\n  Env file not found: .env.${server}\n`));
+    const { envFile, envFilePath, server } = target;
+
+    if (!fs.existsSync(envFilePath)) {
+        console.error(chalk.red(`\n  Env file not found: ${envFile}\n`));
         process.exit(1);
     }
 
-    const content = fs.readFileSync(envFile, 'utf8');
+    const content = fs.readFileSync(envFilePath, 'utf8');
     const portMatch = content.match(/^PORT=(\d+)/m);
     if (!portMatch) {
-        console.error(chalk.red(`\n  No PORT defined in .env.${server}\n`));
+        console.error(chalk.red(`\n  No PORT defined in ${envFile}\n`));
         process.exit(1);
     }
 

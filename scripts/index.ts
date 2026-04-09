@@ -21,10 +21,16 @@ import { runNewModel } from './commands/newModel';
 import { runSyncModel } from './commands/syncModel';
 import { runNewController } from './commands/newController';
 import { runNewValidator } from './commands/newValidator';
+import { runNewEnv } from './commands/newEnv';
 import { runNewServer } from './commands/newServer';
 import { runKillThread } from './commands/killThread';
 import { runDockerBuild } from './commands/dockerBuild';
 import { runDeploy } from './commands/deploy';
+import {
+    getAvailableEnvFiles as listAvailableEnvFiles,
+    getAvailableServers as listAvailableServers,
+    resolveEnvTarget,
+} from './utils/env';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -44,12 +50,7 @@ const scriptsDir = import.meta.dirname;
 // ---------------------------------------------------------------------------
 
 function getAvailableServers(): string[] {
-    const cwd = process.cwd();
-    return fs.readdirSync(cwd)
-        .map(f => f.match(/^\.env\.(.+)$/))
-        .filter((m): m is RegExpMatchArray => m !== null)
-        .map(m => m[1])
-        .sort();
+    return listAvailableServers(process.cwd());
 }
 
 function availableServersHint(): string {
@@ -60,10 +61,7 @@ function availableServersHint(): string {
 }
 
 function getAvailableEnvFiles(): string[] {
-    const cwd = process.cwd();
-    return fs.readdirSync(cwd)
-        .filter(f => /^\.env\..+$/.test(f))
-        .sort();
+    return listAvailableEnvFiles(process.cwd());
 }
 
 function availableEnvFilesHint(): string {
@@ -105,58 +103,54 @@ function getProject(): string | null {
 }
 
 function getServer(): string | null {
-    const serverArg = rest.find(a => a.startsWith('--server='));
-    if (serverArg) return serverArg.split('=')[1];
-
-    // Derive server name from --env=.env.<name> or --env-file=.env.<name>
-    const envArg = rest.find(a => a.startsWith('--env=') || a.startsWith('--env-file='));
-    if (envArg) {
-        const envPath = envArg.split('=')[1];
-        const basename = path.basename(envPath); // e.g. ".env.api"
-        const match = basename.match(/^\.env\.(.+)$/);
-        if (match) return match[1];
-    }
-
-    return null;
+    return resolveEnvTarget(rest, process.cwd())?.server ?? null;
 }
 
 function requireServer(): string {
-    const serverArg = rest.find(a => a.startsWith('--server='));
-    const envArg = rest.find(a => a.startsWith('--env=') || a.startsWith('--env-file='));
-
-    // Validate --server flag
-    if (serverArg) {
-        const server = serverArg.split('=')[1];
-        const available = getAvailableServers();
-        if (available.length > 0 && !available.includes(server)) {
-            console.error(chalk.red(`\n  Incorrect server: ${chalk.bold(server)}`));
-            console.error(chalk.gray(`  ${availableServersHint()}\n`));
-            process.exit(1);
-        }
-        return server;
+    const resolved = resolveEnvTarget(rest, process.cwd());
+    if (!resolved) {
+        console.error(chalk.red('\n  Missing required option: --server=<name>, --env=<name>, or --env-file=.env.<name>'));
+        console.error(chalk.gray(`  ${availableServersHint()}\n`));
+        process.exit(1);
     }
 
-    // Validate --env / --env-file flag
-    if (envArg) {
-        const envPath = envArg.split('=')[1];
-        const basename = path.basename(envPath);
-        const match = basename.match(/^\.env\.(.+)$/);
-        if (match) {
-            const server = match[1];
-            const cwd = process.cwd();
-            const absEnvPath = path.isAbsolute(envPath) ? envPath : path.join(cwd, envPath);
-            if (!fs.existsSync(absEnvPath)) {
-                console.error(chalk.red(`\n  Incorrect env file: ${chalk.bold(envPath)}`));
-                console.error(chalk.gray(`  ${availableEnvFilesHint()}\n`));
-                process.exit(1);
-            }
-            return server;
-        }
+    const available = getAvailableServers();
+    if (available.length > 0 && !available.includes(resolved.server)) {
+        console.error(chalk.red(`\n  Incorrect server: ${chalk.bold(resolved.server)}`));
+        console.error(chalk.gray(`  ${availableServersHint()}\n`));
+        process.exit(1);
     }
 
-    console.error(chalk.red('\n  Missing required option: --server=<name> or --env=.env.<name>'));
-    console.error(chalk.gray(`  ${availableServersHint()}\n`));
-    process.exit(1);
+    const envArg = rest.find(a => a.startsWith('--env='));
+    const envFileArg = rest.find(a => a.startsWith('--env-file='));
+    if ((envArg || envFileArg) && !fs.existsSync(resolved.envFilePath)) {
+        const badEnv = envFileArg?.split('=')[1] ?? envArg?.split('=')[1] ?? resolved.envFile;
+        console.error(chalk.red(`\n  Incorrect env file: ${chalk.bold(badEnv)}`));
+        console.error(chalk.gray(`  ${availableEnvFilesHint()}\n`));
+        process.exit(1);
+    }
+
+    return resolved.server;
+}
+
+function requireEnvTarget() {
+    const resolved = resolveEnvTarget(rest, process.cwd());
+    if (!resolved) {
+        console.error(chalk.red('\n  Missing required option: --server=<name>, --env=<name>, or --env-file=.env.<name>'));
+        console.error(chalk.gray(`  ${availableServersHint()}\n`));
+        process.exit(1);
+    }
+
+    const envArg = rest.find(a => a.startsWith('--env='));
+    const envFileArg = rest.find(a => a.startsWith('--env-file='));
+    if ((envArg || envFileArg) && !fs.existsSync(resolved.envFilePath)) {
+        const badEnv = envFileArg?.split('=')[1] ?? envArg?.split('=')[1] ?? resolved.envFile;
+        console.error(chalk.red(`\n  Incorrect env file: ${chalk.bold(badEnv)}`));
+        console.error(chalk.gray(`  ${availableEnvFilesHint()}\n`));
+        process.exit(1);
+    }
+
+    return resolved;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +218,15 @@ const commands: Record<string, CommandDef> = {
         },
     },
 
+    // ── New env scaffold ────────────────────────────────────────────────────
+    'new:env': {
+        description: 'Clone a server env file into an environment-specific variant',
+        usage: 'morphis new:env <env-name> --server=<name> [--from=.env.<name>]',
+        run() {
+            runNewEnv(rest);
+        },
+    },
+
     // ── New server scaffold ───────────────────────────────────────────────────
     'new:server': {
         description: 'Scaffold a new server (routes file + env file)',
@@ -246,22 +249,22 @@ const commands: Record<string, CommandDef> = {
     // ── Build ────────────────────────────────────────────────────────────────
     'build': {
         description: 'Bundle a server for production',
-        usage: 'morphis build --server=<name>',
+        usage: 'morphis build --server=<name> [--env=<name>]',
         run() {
-            const server = requireServer();
-            spawnBun([path.join(scriptsDir, 'commands', 'build.ts'), `--server=${server}`]);
+            const target = requireEnvTarget();
+            spawnBun([`--env-file=${target.envFile}`, path.join(scriptsDir, 'commands', 'build.ts'), `--server=${target.server}`]);
         },
     },
 
     // ── Dev server ───────────────────────────────────────────────────────────
     'dev': {
         description: 'Start development server in watch mode',
-        usage: 'morphis dev --server=<name> [--project=<name>]',
+        usage: 'morphis dev --server=<name> [--env=<name>] [--project=<name>]',
         run() {
-            const server = requireServer();
+            const target = requireEnvTarget();
             const project = getProject();
             const projectArg = project ? [`--project=${project}`] : [];
-            spawnBun(['--watch', `--env-file=.env.${server}`, 'src/index.ts', `--server=${server}`, ...projectArg]);
+            spawnBun(['--watch', `--env-file=${target.envFile}`, 'src/index.ts', `--server=${target.server}`, ...projectArg]);
         },
     },
 
@@ -286,13 +289,12 @@ const commands: Record<string, CommandDef> = {
     // ── Docker image build ────────────────────────────────────────────────────
     'docker:build': {
         description: 'Build a Docker image for a server (runs morphis build first)',
-        usage: 'morphis docker:build --server=<name> [--version=<tag>] [--no-build]',
+        usage: 'morphis docker:build --server=<name> [--env=<name>] [--version=<tag>] [--no-build]',
         async run() {
-            const server = requireServer();
             const versionArg = rest.find(a => a.startsWith('--version='));
             const noBuild = rest.includes('--no-build');
             await runDockerBuild([
-                `--server=${server}`,
+                ...rest.filter(arg => arg.startsWith('--server=') || arg.startsWith('--env=') || arg.startsWith('--env-file=')),
                 ...(versionArg ? [versionArg] : []),
                 ...(noBuild ? ['--no-build'] : []),
             ]);
@@ -302,7 +304,7 @@ const commands: Record<string, CommandDef> = {
     // ── Serverless deploy ────────────────────────────────────────────────────
     'deploy': {
         description: 'Deploy a server to AWS Lambda, Google Cloud Run, or Cloudflare Containers',
-        usage: 'morphis deploy --server=<name> --target=aws|gcloud|cloudflare [--version=<tag>] [--region=<region>] [--gcp-project=<id>] [--function=<name>] [--service=<name>] [--worker=<name>] [--max-instances=<n>] [--port=<n>] [--sleep-after=<duration>] [--no-build] [--no-docker-build]',
+        usage: 'morphis deploy --server=<name> [--env=<name>] --target=aws|gcloud|cloudflare [--version=<tag>] [--region=<region>] [--gcp-project=<id>] [--function=<name>] [--service=<name>] [--worker=<name>] [--max-instances=<n>] [--port=<n>] [--sleep-after=<duration>] [--no-build] [--no-docker-build]',
         async run() {
             await runDeploy(rest);
         },
@@ -320,14 +322,14 @@ const commands: Record<string, CommandDef> = {
     // ── Production server ────────────────────────────────────────────────────
     'start': {
         description: 'Start the built production server',
-        usage: 'morphis start --server=<name> [--project=<name>] [--no-build]',
+        usage: 'morphis start --server=<name> [--env=<name>] [--project=<name>] [--no-build]',
         async run() {
-            const server = requireServer();
+            const target = requireEnvTarget();
             const noBuild = rest.includes('--no-build');
 
             if (!noBuild) {
                 await new Promise<void>((resolve) => {
-                    const buildProc = spawn('bun', [path.join(scriptsDir, 'commands', 'build.ts'), `--server=${server}`], {
+                    const buildProc = spawn('bun', [`--env-file=${target.envFile}`, path.join(scriptsDir, 'commands', 'build.ts'), `--server=${target.server}`], {
                         stdio: 'inherit',
                         cwd: process.cwd(),
                         shell: process.platform === 'win32',
@@ -345,7 +347,7 @@ const commands: Record<string, CommandDef> = {
 
             const project = getProject();
             const projectArg = project ? [`--project=${project}`] : [];
-            spawnBun([`--env-file=.env.${server}`, `dist/${server}/index.js`, '--colorless', ...projectArg]);
+            spawnBun([`--env-file=${target.envFile}`, `dist/${target.server}/index.js`, '--colorless', ...projectArg]);
         },
     },
 };
@@ -381,8 +383,12 @@ function printHelp() {
         chalk.gray(`Target server name  (${availableServersHint()})`),
     );
     console.log(
-        '    ' + chalk.yellow('--env=.env.<name>') + '    ' +
-        chalk.gray('Derive server name from env file path'),
+        '    ' + chalk.yellow('--env=<name>') + '         ' +
+        chalk.gray('Load .env.<env>.<server> for commands that support env selection'),
+    );
+    console.log(
+        '    ' + chalk.yellow('--env-file=.env.<name>') + ' ' +
+        chalk.gray('Use an explicit env file path and derive the server from it when needed'),
     );
     console.log();
     console.log(chalk.bold('  Examples'));
@@ -394,14 +400,15 @@ function printHelp() {
     console.log(chalk.gray('    morphis new:model       Post                --connection=analytics-db -m -c -r'));
     console.log(chalk.gray('    morphis new:controller  OrderController'));
     console.log(chalk.gray('    morphis new:validator   OrderValidator'));
+    console.log(chalk.gray('    morphis new:env         dev                 --server=api'));
     console.log(chalk.gray('    morphis migrate'));
     console.log(chalk.gray('    morphis migrate                             --connection=analytics-db'));
     console.log(chalk.gray('    morphis route:list      --server=api'));
-    console.log(chalk.gray('    morphis build           --server=chat'));
-    console.log(chalk.gray('    morphis dev             --env=.env.mini'));
-    console.log(chalk.gray('    morphis start           --env=.env.api'));
+    console.log(chalk.gray('    morphis build           --server=chat --env=stg'));
+    console.log(chalk.gray('    morphis dev             --server=mini --env=dev'));
+    console.log(chalk.gray('    morphis start           --env-file=.env.dev.api'));
     console.log(chalk.gray('    morphis docker:build    --server=api --version=1.0.0'));
-    console.log(chalk.gray('    morphis deploy          --server=api --target=aws --version=1.0.0 --region=ap-southeast-1'));
+    console.log(chalk.gray('    morphis deploy          --server=api --env=dev --target=aws --version=1.0.0 --region=ap-southeast-1'));
     console.log(chalk.gray('    morphis deploy          --server=api --target=gcloud --version=1.0.0 --gcp-project=my-project'));
     console.log(chalk.gray('    morphis deploy          --server=api --target=cloudflare --version=1.0.0'));
     console.log();

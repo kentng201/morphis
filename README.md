@@ -47,7 +47,7 @@ src/
 └── index.ts            # Entry point — picks the server from --server=<name>
 ```
 
-Each `.env.<name>` file defines an independent server. `morphis dev --server=api` boots `.env.api`, meaning you can run `api`, `admin`, or `worker` as separate processes from the same codebase — no refactoring required.
+Each `.env.<server>` file defines an independent server. When you need per-environment variants, `morphis dev --server=api --env=dev` loads `.env.dev.api` while keeping `.env.api` as the default fallback when no `--env` is passed. Use `morphis new:env dev --server=api` to clone `.env.api` into `.env.dev.api`.
 
 ---
 
@@ -71,6 +71,7 @@ bun install
 
 ```bash
 bun run dev          # runs morphis dev --server=api
+morphis dev --server=api --env=dev
 ```
 
 **List all registered routes:**

@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, execSync } from 'child_process';
 import { runDockerBuild, generateDockerfile } from './dockerBuild';
+import { resolveEnvTarget } from '../utils/env';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -19,9 +20,9 @@ function getProjectName(cwd: string, server: string): string {
     return server;
 }
 
-function getImageName(cwd: string, server: string): string {
+function getImageName(cwd: string, server: string, envName?: string | null): string {
     const project = getProjectName(cwd, server);
-    return `${project}-${server}`;
+    return envName ? `${project}-${server}-${envName}` : `${project}-${server}`;
 }
 
 function getPackageVersion(cwd: string): string {
@@ -398,6 +399,7 @@ function toPascalCase(name: string): string {
 
 async function deployCloudflare(opts: {
     cwd: string;
+    envFile: string;
     server: string;
     version: string;
     workerName: string;
@@ -406,7 +408,7 @@ async function deployCloudflare(opts: {
     sleepAfter: string;
     noBuild: boolean;
 }) {
-    const { cwd, server, version, workerName, maxInstances, port, sleepAfter, noBuild } = opts;
+    const { cwd, envFile, server, version, workerName, maxInstances, port, sleepAfter, noBuild } = opts;
 
     const className = `${toPascalCase(server)}Container`;
     const bindingName = `${server.toUpperCase().replace(/-/g, '_')}_CONTAINER`;
@@ -482,7 +484,7 @@ async function deployCloudflare(opts: {
             const scriptsDir = import.meta.dirname;
             console.log(chalk.cyan(`\n  [deploy:cloudflare] Building "${server}" bundle ...\n`));
             await new Promise<void>((resolve) => {
-                const proc = spawn('bun', [path.join(scriptsDir, 'build.ts'), `--server=${server}`], {
+                const proc = spawn('bun', [`--env-file=${envFile}`, path.join(scriptsDir, 'build.ts'), `--server=${server}`], {
                     stdio: 'inherit',
                     cwd,
                     shell: process.platform === 'win32',
@@ -506,7 +508,7 @@ async function deployCloudflare(opts: {
         }
 
         // Step 2: Write a Dockerfile that packages the Bun bundle
-        fs.writeFileSync(path.join(cwd, dockerfileName), generateDockerfile(server, { port }), 'utf8');
+        fs.writeFileSync(path.join(cwd, dockerfileName), generateDockerfile(server, { envFile, port }), 'utf8');
 
         // Step 3: Write a Worker entry that routes all requests into the container.
         //   Uses @cloudflare/containers which wraps Durable Objects boilerplate.
@@ -577,9 +579,9 @@ async function deployCloudflare(opts: {
             process.exit(1);
         }
 
-        // Pass the project's .env.<server> file to Wrangler so its variables are available.
-        const envFilePath = path.join(cwd, `.env.${server}`);
-        const envFileArgs = fs.existsSync(envFilePath) ? ['--env-file', `.env.${server}`] : [];
+        // Pass the selected env file to Wrangler so its variables are available.
+        const envFilePath = path.join(cwd, envFile);
+        const envFileArgs = fs.existsSync(envFilePath) ? ['--env-file', envFile] : [];
 
         await new Promise<void>((resolve) => {
             const proc = spawn(
@@ -626,7 +628,6 @@ async function deployCloudflare(opts: {
 // ---------------------------------------------------------------------------
 
 export async function runDeploy(args: string[]) {
-    const serverArg = args.find(a => a.startsWith('--server='));
     const targetArg = args.find(a => a.startsWith('--target='));
     const versionArg = args.find(a => a.startsWith('--version='));
     const regionArg = args.find(a => a.startsWith('--region='));
@@ -640,13 +641,19 @@ export async function runDeploy(args: string[]) {
     const sleepAfterArg = args.find(a => a.startsWith('--sleep-after='));
     const noBuild = args.includes('--no-build');
     const noBuildDocker = args.includes('--no-docker-build');
-
-    const server = serverArg?.split('=')[1];
     const target = targetArg?.split('=')[1];
     let version = versionArg?.split('=')[1] ?? 'latest';
+    const cwd = process.cwd();
+    const envTarget = resolveEnvTarget(args, cwd);
 
-    if (!server) {
-        console.error(chalk.red('\n  Missing required option: --server=<name>\n'));
+    if (!envTarget) {
+        console.error(chalk.red('\n  Missing required option: --server=<name>, --env=<name>, or --env-file=.env.<name>\n'));
+        process.exit(1);
+    }
+
+    const { envFile, envName, server } = envTarget;
+    if ((args.some(arg => arg.startsWith('--env=')) || args.some(arg => arg.startsWith('--env-file='))) && !fs.existsSync(envTarget.envFilePath)) {
+        console.error(chalk.red(`\n  Env file not found: ${envFile}\n`));
         process.exit(1);
     }
 
@@ -656,8 +663,7 @@ export async function runDeploy(args: string[]) {
         process.exit(1);
     }
 
-    const cwd = process.cwd();
-    const imageName = getImageName(cwd, server);
+    const imageName = getImageName(cwd, server, envName);
 
     // For aws without an explicit --version, auto-resolve from package.json + ECR tags
     if (target === 'aws' && !versionArg) {
@@ -697,7 +703,7 @@ export async function runDeploy(args: string[]) {
         const maxInstances = Number(maxInstancesArg?.split('=')[1] ?? '3');
         const port = Number(portArg?.split('=')[1] ?? '8080');
         const sleepAfter = sleepAfterArg?.split('=')[1] ?? '2m';
-        await deployCloudflare({ cwd, server, version, workerName, maxInstances, port, sleepAfter, noBuild });
+        await deployCloudflare({ cwd, envFile, server, version, workerName, maxInstances, port, sleepAfter, noBuild });
         return;
     }
 
@@ -706,6 +712,7 @@ export async function runDeploy(args: string[]) {
         ? `${imageName}:${version}`
         : await runDockerBuild([
             `--server=${server}`,
+            ...(envName ? [`--env=${envName}`] : []),
             `--version=${version}`,
             ...(noBuild ? ['--no-build'] : []),
             ...(target === 'aws' ? ['--lambda'] : []),
