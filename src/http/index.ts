@@ -1,5 +1,6 @@
 export { Router } from './Router';
 export { Middleware } from './Middleware';
+export { Trace, withTrace } from './Trace';
 export { Transformer } from './Transformer';
 export { Context, current, runWithContext, setContextFactory, useContext } from './Context';
 export { Validator } from './Validator';

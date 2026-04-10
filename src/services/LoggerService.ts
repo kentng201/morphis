@@ -225,9 +225,9 @@ function parseStackFrames(): StackFrame[] {
             }
 
             const parts = raw.split('.');
-            const method = raw && raw !== '<anonymous>' ? parts.at(-1) : undefined;
+            const method = raw && raw !== '<anonymous>' ? parts[parts.length - 1] : undefined;
             const inferredOwner = inferOwnerFromSource(filePath, lineNumber);
-            const owner = parts.length > 1 ? parts.at(-2) : inferredOwner;
+            const owner = parts.length > 1 ? parts[parts.length - 2] : inferredOwner;
             const serviceMatch = (owner ?? raw).match(/([A-Z][A-Za-z0-9]*Service)$/);
 
             return {

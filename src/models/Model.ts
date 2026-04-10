@@ -1,4 +1,7 @@
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { ConnectionManager, type ConnectionEntry } from '../db/ConnectionManager';
+import { current } from '../http/Context';
 
 // ── Schema helpers ────────────────────────────────────────────────────────────
 
@@ -253,6 +256,248 @@ async function normalizeWhere(table: any, where: unknown): Promise<any> {
     return and(...predicates);
 }
 
+function withModelTrace<T>(
+    modelName: string,
+    methodName: string,
+    run: () => Promise<T>,
+): Promise<T> {
+    const callSite = new Error(`[Morphis Trace] ${modelName}.${methodName}`);
+
+    return run().catch((err: unknown) => {
+        const traceFrames = buildModelTraceFrames(callSite.stack, methodName, current.trace ?? []);
+        const traceBlock = traceFrames.length > 0 ? `\n${traceFrames.join('\n')}` : '';
+
+        if (err instanceof Error) {
+            if (traceFrames.length > 0 && !traceFrames.every(frame => err.stack?.includes(frame))) {
+                err.stack = `${err.stack ?? `${err.name}: ${err.message}`}${traceBlock}`;
+            }
+            throw err;
+        }
+
+        const wrapped = new Error(String(err));
+        wrapped.stack = `${wrapped.stack ?? `Error: ${wrapped.message}`}${traceBlock}`;
+        throw wrapped;
+    });
+}
+
+type TraceFrame = {
+    raw: string;
+    filePath?: string;
+    lineNumber?: number;
+    columnNumber?: number;
+    method?: string;
+    owner?: string;
+};
+
+type TraceIdentity = {
+    owner?: string;
+    method?: string;
+    columnNumber?: number;
+};
+
+const modelSourceCache = new Map<string, string[]>();
+const traceLabelCache = new Map<string, string | null>();
+
+function getModelSourceLines(filePath: string): string[] | null {
+    if (filePath === 'native' || filePath.startsWith('node:') || filePath.includes('[eval]')) return null;
+    const cached = modelSourceCache.get(filePath);
+    if (cached) return cached;
+
+    try {
+        const lines = readFileSync(filePath, 'utf8').split('\n');
+        modelSourceCache.set(filePath, lines);
+        return lines;
+    } catch {
+        return null;
+    }
+}
+
+function inferTraceIdentity(filePath?: string, lineNumber?: number): TraceIdentity {
+    if (!filePath || !lineNumber) return {};
+    const lines = getModelSourceLines(filePath);
+    if (!lines) return {};
+
+    let owner: string | undefined;
+    let method: string | undefined;
+    let columnNumber: number | undefined;
+
+    for (let index = Math.min(lineNumber - 1, lines.length - 1); index >= 0; index -= 1) {
+        const line = lines[index];
+        const classMatch = line.match(/(?:export\s+default\s+|export\s+)?(?:abstract\s+)?class\s+([A-Z][A-Za-z0-9_]*)/);
+        if (!owner && classMatch) owner = classMatch[1];
+
+        const methodMatch = line.match(/^\s*(?:public\s+|private\s+|protected\s+)?(?:static\s+)?(?:async\s+)?([A-Za-z_$][\w$]*)\s*\(/);
+        if (!method && methodMatch && methodMatch[1] !== 'constructor') {
+            method = methodMatch[1];
+            columnNumber = line.indexOf(method) + 1;
+        }
+
+        const functionMatch = line.match(/^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/);
+        if (!method && functionMatch) {
+            method = functionMatch[1];
+            columnNumber = line.indexOf(method) + 1;
+        }
+
+        if (owner && method) break;
+    }
+
+    return { owner, method, columnNumber };
+}
+
+function walkSourceFiles(dirPath: string): string[] {
+    try {
+        return readdirSync(dirPath).flatMap((entry) => {
+            const fullPath = join(dirPath, entry);
+            const stats = statSync(fullPath);
+            if (stats.isDirectory()) return walkSourceFiles(fullPath);
+            if (!/\.(ts|tsx|js|jsx)$/.test(entry) || entry.endsWith('.d.ts')) return [];
+            return [fullPath];
+        });
+    } catch {
+        return [];
+    }
+}
+
+function resolveTraceLabelLine(label?: string): string | undefined {
+    if (!label) return undefined;
+    const cached = traceLabelCache.get(label);
+    if (cached !== undefined) return cached ?? undefined;
+
+    const [owner, method] = label.split('.');
+    if (!owner || !method) {
+        traceLabelCache.set(label, label);
+        return label;
+    }
+
+    const sourceRoot = join(process.cwd(), 'src');
+    for (const filePath of walkSourceFiles(sourceRoot)) {
+        const lines = getModelSourceLines(filePath);
+        if (!lines) continue;
+
+        let insideOwner = false;
+        for (let index = 0; index < lines.length; index += 1) {
+            const line = lines[index];
+            const classMatch = line.match(/(?:export\s+default\s+|export\s+)?(?:abstract\s+)?class\s+([A-Z][A-Za-z0-9_]*)/);
+            if (classMatch) {
+                insideOwner = classMatch[1] === owner;
+            }
+            if (!insideOwner) continue;
+
+            const methodMatch = line.match(new RegExp(`^\\s*(?:public\\s+|private\\s+|protected\\s+)?(?:static\\s+)?(?:async\\s+)?${method}\\s*\\(`));
+            if (!methodMatch) continue;
+
+            const column = line.indexOf(method) + 1;
+            const resolved = `${method} (${filePath}:${index + 1}:${column})`;
+            traceLabelCache.set(label, resolved);
+            return resolved;
+        }
+    }
+
+    traceLabelCache.set(label, label);
+    return label;
+}
+
+function parseTraceFrames(stack?: string): TraceFrame[] {
+    if (!stack) return [];
+
+    const frames: Array<TraceFrame | null> = stack
+        .split('\n')
+        .slice(1)
+        .map((line) => {
+            const match = line.match(/^\s*at (?:(?:async )?(?:new )?([^\s(]+) )?\(?(.+):(\d+):(\d+)\)?$/);
+            const raw = match?.[1] ?? '';
+            const filePath = match?.[2];
+            const lineNumber = match?.[3] ? Number(match[3]) : undefined;
+            const columnNumber = match?.[4] ? Number(match[4]) : undefined;
+
+            if (!match || (!raw && !filePath)) return null;
+
+            const parts = raw.split('.');
+            const inferred = inferTraceIdentity(filePath, lineNumber);
+            const method = raw && raw !== '<anonymous>' ? parts[parts.length - 1] : inferred.method;
+            const owner = parts.length > 1 ? parts[parts.length - 2] : inferred.owner;
+
+            return {
+                raw,
+                filePath,
+                lineNumber,
+                columnNumber: columnNumber ?? inferred.columnNumber,
+                method,
+                owner,
+            };
+        });
+
+    return frames.filter((frame): frame is TraceFrame => frame !== null);
+}
+
+function isInternalTraceFrame(frame: TraceFrame): boolean {
+    const isNodeFile = frame.filePath !== undefined && frame.filePath.startsWith('node:');
+    const isRouterWrapper = frame.filePath !== undefined
+        && frame.filePath.includes('/src/http/Router.ts')
+        && frame.raw === 'routeHandler';
+
+    return frame.raw === 'withModelTrace'
+        || frame.raw === 'withTrace'
+        || frame.raw === 'moduleEvaluation'
+        || frame.raw === 'loadAndEvaluateModule'
+        || frame.raw === 'asyncModuleEvaluation'
+        || frame.raw === 'run'
+        || isRouterWrapper
+        || frame.raw.startsWith('processTicksAndRejections')
+        || frame.filePath === 'native'
+        || isNodeFile;
+}
+
+function hasUsefulTraceIdentity(frame: TraceFrame): boolean {
+    return Boolean(frame.owner || frame.method);
+}
+
+function formatTraceFrame(frame: TraceFrame): string | undefined {
+    const label = frame.raw && frame.raw !== '<anonymous>'
+        ? frame.raw
+        : frame.method ?? frame.owner;
+    if (!label) return undefined;
+
+    if (!frame.filePath || !frame.lineNumber) return `    at ${label}`;
+    const location = `${frame.filePath}:${frame.lineNumber}${frame.columnNumber ? `:${frame.columnNumber}` : ''}`;
+    return `    at ${label} (${location})`;
+}
+
+function buildModelTraceFrames(stack: string | undefined, methodName: string, trace: string[]): string[] {
+    const frames = parseTraceFrames(stack)
+        .filter(frame => hasUsefulTraceIdentity(frame) && !isInternalTraceFrame(frame));
+    const tracedFrames = trace
+        .map(label => resolveTraceLabelLine(label) ?? label)
+        .map(label => `    at ${label}`);
+    const traceLines: string[] = [];
+    const tracedMethods = new Set(trace.map(label => label.split('.')[1]).filter(Boolean));
+    const missingTracedFrames = tracedFrames.filter((_, index) => {
+        const method = trace[index]?.split('.')[1];
+        return method ? !frames.some(frame => frame.method === method) : true;
+    });
+
+    for (const frame of frames) {
+        const formatted = formatTraceFrame(frame);
+        if (!formatted) continue;
+
+        traceLines.push(formatted);
+
+        if (frame.method === methodName && missingTracedFrames.length > 0) {
+            traceLines.push(...missingTracedFrames);
+        }
+    }
+
+    if (traceLines.length === 0 && tracedFrames.length > 0) {
+        traceLines.push(...tracedFrames);
+    } else if (traceLines.length > 0) {
+        for (const frame of missingTracedFrames) {
+            if (!traceLines.includes(frame)) traceLines.push(frame);
+        }
+    }
+
+    return Array.from(new Set(traceLines));
+}
+
 // ── ModelInstance wrapper ──────────────────────────────────────────────────────
 
 export class ModelInstance {
@@ -456,90 +701,106 @@ export class Model {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     static async findAll(this: any, options?: QueryOptions): Promise<ModelInstance[]> {
-        await this.initialize();
-        let query = this._drizzle.select().from(this.table);
-        const where = await normalizeWhere(this.table, options?.where);
-        if (where) query = query.where(where);
-        if (options?.orderBy) query = query.orderBy(options.orderBy);
-        if (options?.limit) query = query.limit(options.limit);
-        if (options?.offset) query = query.offset(options.offset);
-        const rows = await query;
-        return rows.map((r: Record<string, unknown>) => new ModelInstance(this, r));
+        return withModelTrace(this.name, 'findAll', async () => {
+            await this.initialize();
+            let query = this._drizzle.select().from(this.table);
+            const where = await normalizeWhere(this.table, options?.where);
+            if (where) query = query.where(where);
+            if (options?.orderBy) query = query.orderBy(options.orderBy);
+            if (options?.limit) query = query.limit(options.limit);
+            if (options?.offset) query = query.offset(options.offset);
+            const rows = await query;
+            return rows.map((r: Record<string, unknown>) => new ModelInstance(this, r));
+        });
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     static async findOne(this: any, options?: QueryOptions): Promise<ModelInstance | null> {
-        await this.initialize();
-        let query = this._drizzle.select().from(this.table);
-        const where = await normalizeWhere(this.table, options?.where);
-        if (where) query = query.where(where);
-        if (options?.orderBy) query = query.orderBy(options.orderBy);
-        query = query.limit(1);
-        const rows = await query;
-        return rows.length > 0 ? new ModelInstance(this, rows[0]) : null;
+        return withModelTrace(this.name, 'findOne', async () => {
+            await this.initialize();
+            let query = this._drizzle.select().from(this.table);
+            const where = await normalizeWhere(this.table, options?.where);
+            if (where) query = query.where(where);
+            if (options?.orderBy) query = query.orderBy(options.orderBy);
+            query = query.limit(1);
+            const rows = await query;
+            return rows.length > 0 ? new ModelInstance(this, rows[0]) : null;
+        });
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     static async findByPk(this: any, id: any, options?: Omit<QueryOptions, 'where'>): Promise<ModelInstance | null> {
-        await this.initialize();
-        const pkCol = findPrimaryKeyColumn(this.table);
-        if (!pkCol) throw new Error('Cannot findByPk: no primary key column found');
+        return withModelTrace(this.name, 'findByPk', async () => {
+            await this.initialize();
+            const pkCol = findPrimaryKeyColumn(this.table);
+            if (!pkCol) throw new Error('Cannot findByPk: no primary key column found');
 
-        const eqMod = await importFromProject('drizzle-orm');
-        const eq = eqMod.eq;
+            const eqMod = await importFromProject('drizzle-orm');
+            const eq = eqMod.eq;
 
-        let query = this._drizzle.select().from(this.table).where(eq(pkCol, id));
-        if (options?.orderBy) query = query.orderBy(options.orderBy);
-        query = query.limit(1);
-        const rows = await query;
-        return rows.length > 0 ? new ModelInstance(this, rows[0]) : null;
+            let query = this._drizzle.select().from(this.table).where(eq(pkCol, id));
+            if (options?.orderBy) query = query.orderBy(options.orderBy);
+            query = query.limit(1);
+            const rows = await query;
+            return rows.length > 0 ? new ModelInstance(this, rows[0]) : null;
+        });
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     static async create(this: any, values: Record<string, any>): Promise<ModelInstance> {
-        await this.initialize();
-        const result = await this._drizzle.insert(this.table).values(values).returning();
-        return new ModelInstance(this, result[0] ?? values);
+        return withModelTrace(this.name, 'create', async () => {
+            await this.initialize();
+            const result = await this._drizzle.insert(this.table).values(values).returning();
+            return new ModelInstance(this, result[0] ?? values);
+        });
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     static async bulkCreate(this: any, records: Record<string, any>[]): Promise<ModelInstance[]> {
-        await this.initialize();
-        const result = await this._drizzle.insert(this.table).values(records).returning();
-        return result.map((r: Record<string, unknown>) => new ModelInstance(this, r));
+        return withModelTrace(this.name, 'bulkCreate', async () => {
+            await this.initialize();
+            const result = await this._drizzle.insert(this.table).values(records).returning();
+            return result.map((r: Record<string, unknown>) => new ModelInstance(this, r));
+        });
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     static async update(this: any, values: Record<string, any>, options: Pick<QueryOptions, 'where'>): Promise<any[]> {
-        await this.initialize();
-        let query = this._drizzle.update(this.table).set(values);
-        const where = await normalizeWhere(this.table, options?.where);
-        if (where) query = query.where(where);
-        const result = await query.returning();
-        return result;
+        return withModelTrace(this.name, 'update', async () => {
+            await this.initialize();
+            let query = this._drizzle.update(this.table).set(values);
+            const where = await normalizeWhere(this.table, options?.where);
+            if (where) query = query.where(where);
+            const result = await query.returning();
+            return result;
+        });
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     static async destroy(this: any, options: Pick<QueryOptions, 'where'>): Promise<any[]> {
-        await this.initialize();
-        let query = this._drizzle.delete(this.table);
-        const where = await normalizeWhere(this.table, options?.where);
-        if (where) query = query.where(where);
-        const result = await query.returning();
-        return result;
+        return withModelTrace(this.name, 'destroy', async () => {
+            await this.initialize();
+            let query = this._drizzle.delete(this.table);
+            const where = await normalizeWhere(this.table, options?.where);
+            if (where) query = query.where(where);
+            const result = await query.returning();
+            return result;
+        });
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     static async count(this: any, options?: QueryOptions): Promise<number> {
-        await this.initialize();
-        const sqlMod = await importFromProject('drizzle-orm');
-        const { sql } = sqlMod;
+        return withModelTrace(this.name, 'count', async () => {
+            await this.initialize();
+            const sqlMod = await importFromProject('drizzle-orm');
+            const { sql } = sqlMod;
 
-        let query = this._drizzle.select({ count: sql`count(*)` }).from(this.table);
-        const where = await normalizeWhere(this.table, options?.where);
-        if (where) query = query.where(where);
-        const rows = await query;
-        return Number(rows[0]?.count ?? 0);
+            let query = this._drizzle.select({ count: sql`count(*)` }).from(this.table);
+            const where = await normalizeWhere(this.table, options?.where);
+            if (where) query = query.where(where);
+            const rows = await query;
+            return Number(rows[0]?.count ?? 0);
+        });
     }
 
     static async findAndCountAll(
@@ -556,19 +817,21 @@ export class Model {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     static async upsert(this: any, values: Record<string, any>): Promise<ModelInstance> {
-        await this.initialize();
-        const pkCol = findPrimaryKeyColumn(this.table);
-        if (!pkCol) throw new Error('Cannot upsert: no primary key column found');
+        return withModelTrace(this.name, 'upsert', async () => {
+            await this.initialize();
+            const pkCol = findPrimaryKeyColumn(this.table);
+            if (!pkCol) throw new Error('Cannot upsert: no primary key column found');
 
-        const result = await this._drizzle
-            .insert(this.table)
-            .values(values)
-            .onConflictDoUpdate({
-                target: pkCol,
-                set: values,
-            })
-            .returning();
-        return new ModelInstance(this, result[0] ?? values);
+            const result = await this._drizzle
+                .insert(this.table)
+                .values(values)
+                .onConflictDoUpdate({
+                    target: pkCol,
+                    set: values,
+                })
+                .returning();
+            return new ModelInstance(this, result[0] ?? values);
+        });
     }
 }
 

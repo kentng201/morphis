@@ -20,6 +20,7 @@ import { runNewMigration } from './commands/newMigration';
 import { runNewModel } from './commands/newModel';
 import { runSyncModel } from './commands/syncModel';
 import { runNewController } from './commands/newController';
+import { runNewService } from './commands/newService';
 import { runNewValidator } from './commands/newValidator';
 import { runNewEnv } from './commands/newEnv';
 import { runNewServer } from './commands/newServer';
@@ -206,6 +207,15 @@ const commands: Record<string, CommandDef> = {
         usage: 'morphis new:controller <ControllerName>',
         run() {
             runNewController(rest);
+        },
+    },
+
+    // ── New service scaffold ────────────────────────────────────────────────
+    'new:service': {
+        description: 'Scaffold a Service class with a default instance export',
+        usage: 'morphis new:service <ServiceName>',
+        run() {
+            runNewService(rest);
         },
     },
 
@@ -399,6 +409,7 @@ function printHelp() {
     console.log(chalk.gray('    morphis new:model       Post'));
     console.log(chalk.gray('    morphis new:model       Post                --connection=analytics-db -m -c -r'));
     console.log(chalk.gray('    morphis new:controller  OrderController'));
+    console.log(chalk.gray('    morphis new:service     ChatService'));
     console.log(chalk.gray('    morphis new:validator   OrderValidator'));
     console.log(chalk.gray('    morphis new:env         dev                 --server=api'));
     console.log(chalk.gray('    morphis migrate'));

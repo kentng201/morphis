@@ -3,7 +3,7 @@ import { HttpMethodMiddleware, ValidateMiddleware, EndpointMiddleware } from './
 import { TransformerMiddleware } from '../middlewares/TransformerMiddleware';
 import { ConnectMiddleware } from '../middlewares/ConnectMiddleware';
 import { Middleware } from './Middleware';
-import { runWithContext } from './Context';
+import { current, runWithContext } from './Context';
 import { ROUTE_KEY } from './metadata';
 
 interface RouteEntry {
@@ -13,6 +13,7 @@ interface RouteEntry {
     paramNames: string[];
     handler: (req: Request) => unknown;
     action: string;
+    traceCaller: string;
     middlewares: string[];
 }
 
@@ -62,9 +63,16 @@ export class Router {
         return this;
     }
 
-    private addRoute(method: HttpMethod, path: string, handler: (req: Request) => unknown, action: string, middlewares: string[] = []): this {
+    private addRoute(
+        method: HttpMethod,
+        path: string,
+        handler: (req: Request) => unknown,
+        action: string,
+        middlewares: string[] = [],
+        traceCaller: string = action,
+    ): this {
         const { pattern, paramNames } = buildPattern(path);
-        this.routes.push({ method, path, pattern, paramNames, handler, action, middlewares });
+        this.routes.push({ method, path, pattern, paramNames, handler, action, traceCaller, middlewares });
         return this;
     }
 
@@ -152,7 +160,7 @@ export class Router {
         const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
         const action = handler.name.replace(/^bound\s+/, '') || '<anonymous>';
         const mwNames = this.collectMiddlewareNames(middlewares);
-        return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames);
+        return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames, action);
     }
 
     /** Register a controller method, or an inline handler with options.middlewares. */
@@ -172,7 +180,7 @@ export class Router {
             const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
             const action = fn.name.replace(/^bound\s+/, '') || '<anonymous>';
             const mwNames = this.collectMiddlewareNames(middlewares);
-            return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames);
+            return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames, action);
         }
         const meta = resolveRouteKey(fn) as any;
         if (!meta) {
@@ -182,7 +190,10 @@ export class Router {
         const action = meta.controllerName
             ? `${meta.controllerName[0].toLowerCase()}${meta.controllerName.slice(1)}.${meta.handlerKey}`
             : fn.name.replace(/^bound\s+/, '') || '<anonymous>';
-        return this.addRoute(meta.method, meta.path, fn, action);
+        const traceCaller = meta.controllerName
+            ? `${meta.controllerName}.${meta.handlerKey}`
+            : action;
+        return this.addRoute(meta.method, meta.path, fn, action, [], traceCaller);
     }
 
     /**
@@ -208,7 +219,8 @@ export class Router {
             const action = controllerName
                 ? `${controllerName[0].toLowerCase()}${controllerName.slice(1)}.${name}`
                 : name;
-            this.addRoute(method, fullPath, fn as (req: Request) => unknown, action);
+            const traceCaller = controllerName ? `${controllerName}.${name}` : action;
+            this.addRoute(method, fullPath, fn as (req: Request) => unknown, action, [], traceCaller);
         }
         return this;
     }
@@ -265,6 +277,9 @@ export class Router {
                 };
 
                 try {
+                    const trace = (current.trace ??= []);
+                    const shouldPushTrace = trace[trace.length - 1] !== route.traceCaller;
+                    if (shouldPushTrace) trace.push(route.traceCaller);
                     // Compose global middlewares around the matched route handler.
                     // The last global middleware calls the route handler as `next`.
                     const routeHandler = (req: Request) => Promise.resolve(route.handler(req));
@@ -279,6 +294,9 @@ export class Router {
                 } catch (err) {
                     console.error('[Router] Handler error:', err);
                     return Response.json({ error: 'Internal server error' }, { status: 500 });
+                } finally {
+                    const trace = current.trace;
+                    if (trace?.[trace.length - 1] === route.traceCaller) trace.pop();
                 }
             }
 

@@ -38,6 +38,8 @@ export class Context {
     trackId?: string;
     /** Full endpoint path set by LoggerMiddleware, e.g. /orders/42 */
     path?: string;
+    /** Active traced call stack, outermost first, e.g. [PostController.get, TestService.get] */
+    trace?: string[];
     /**
      * Key-value store of active Drizzle db instances, keyed by connection name.
      * A connection is only populated after the matching `Connect(name)` middleware runs.
