@@ -465,9 +465,10 @@ function toCriterion(rule: AnySimpleRule): ValidationCriterion {
         case 'lessThan':
         case 'lessThanOrEqual':
             return { type: rule.type, value: rule.value };
-        default:
-            return { type: rule.type };
     }
+
+    const unreachableRule: never = rule;
+    return { type: String(unreachableRule) };
 }
 
 function buildFieldMetadata(path: string, rawValues: Array<AnySimpleRule | ValidationRule<any>>): ValidationFieldMetadata {

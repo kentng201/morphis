@@ -252,14 +252,14 @@ const commands: Record<string, CommandDef> = {
         description: 'List all registered HTTP routes for a server',
         usage: 'morphis route:list --server=<name> [--format=table|json|openapi] [--title=<name>] [--version=<semver>] [--description=<text>]',
         run() {
-            const server = requireServer();
+            const target = requireEnvTarget();
             const passthroughArgs = rest.filter(arg =>
                 arg.startsWith('--format=')
                 || arg.startsWith('--title=')
                 || arg.startsWith('--version=')
                 || arg.startsWith('--description='),
             );
-            spawnBun([path.join(scriptsDir, 'commands', 'listRoutes.ts'), `--server=${server}`, ...passthroughArgs]);
+            spawnBun([`--env-file=${target.envFile}`, path.join(scriptsDir, 'commands', 'listRoutes.ts'), `--server=${target.server}`, ...passthroughArgs]);
         },
     },
 

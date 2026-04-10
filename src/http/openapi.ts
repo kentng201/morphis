@@ -4,9 +4,58 @@ export interface OpenApiBuildOptions {
     title?: string;
     version?: string;
     description?: string;
+    serverUrl?: string;
+    servers?: Array<{ url: string; description?: string }>;
 }
 
 type OpenApiSchema = Record<string, unknown>;
+
+function normalizeServerUrl(url: string): string {
+    return url.replace(/\/+$/, '');
+}
+
+function resolveServerUrls(options: OpenApiBuildOptions): Array<{ url: string; description?: string }> {
+    if (options.servers && options.servers.length > 0) {
+        return options.servers.map(server => ({
+            ...server,
+            url: normalizeServerUrl(server.url),
+        }));
+    }
+
+    if (options.serverUrl) {
+        return [{ url: normalizeServerUrl(options.serverUrl) }];
+    }
+
+    const envUrl = process.env.EXPOSE_URL
+        ?? process.env.APP_URL
+        ?? process.env.BASE_URL
+        ?? process.env.PUBLIC_URL
+        ?? process.env.SERVER_URL
+        ?? process.env.API_URL;
+    if (envUrl) {
+        return [{ url: normalizeServerUrl(envUrl) }];
+    }
+
+    const rawHost = process.env.EXPOSE_HOST ?? process.env.HOST;
+    const rawPort = process.env.EXPOSE_PORT ?? process.env.PORT;
+    const rawPath = process.env.EXPOSE_PATH ?? process.env.BASE_PATH ?? '';
+    const protocol = (process.env.EXPOSE_PROTOCOL ?? process.env.PROTOCOL ?? '').toLowerCase();
+    const useHttps = protocol === 'https' || process.env.HTTPS === 'true' || process.env.HTTPS === '1';
+
+    if (!rawHost && !rawPort) {
+        return [];
+    }
+
+    const basePath = rawPath ? `/${rawPath.replace(/^\/+|\/+$/g, '')}` : '';
+    const host = rawHost && rawHost !== '0.0.0.0' && rawHost !== '::' ? rawHost : 'localhost';
+
+    if (host.startsWith('http://') || host.startsWith('https://')) {
+        return [{ url: normalizeServerUrl(`${host}${basePath}`) }];
+    }
+
+    const portSegment = rawPort ? `:${rawPort}` : '';
+    return [{ url: normalizeServerUrl(`${useHttps ? 'https' : 'http'}://${host}${portSegment}${basePath}`) }];
+}
 
 function toOpenApiPath(path: string): string {
     return path.replace(/:([A-Za-z0-9_]+)/g, '{$1}');
@@ -152,6 +201,7 @@ function fieldByName(fields: ValidationFieldMetadata[]): Map<string, ValidationF
 
 export function buildOpenApiDocument(server: string, routes: RouteSpec[], options: OpenApiBuildOptions = {}) {
     const paths: Record<string, Record<string, Record<string, unknown>>> = {};
+    const servers = resolveServerUrls(options);
 
     for (const route of routes) {
         const openApiPath = toOpenApiPath(route.path);
@@ -245,6 +295,7 @@ export function buildOpenApiDocument(server: string, routes: RouteSpec[], option
             version: options.version ?? '1.0.0',
             ...(options.description ? { description: options.description } : {}),
         },
+        ...(servers.length > 0 ? { servers } : {}),
         paths,
     };
 }
