@@ -80,7 +80,17 @@ morphis dev --server=api --env=dev
 
 ```bash
 bun run route:list
+morphis route:list --server=api --format=json
+morphis route:list --server=api --format=openapi --title="My API"
 ```
+
+`route:list` now supports three output modes:
+
+- Default table output for human inspection
+- `--format=json` for machine-readable route metadata, including validation criteria like `required`, `optional`, `nullable`, and `nullish`
+- `--format=openapi` for generated OpenAPI 3 JSON
+
+If you want an interactive API preview, use the separate `@morphis/scalar` package so UI concerns do not add dependencies to the core `morphis` framework.
 
 ---
 
