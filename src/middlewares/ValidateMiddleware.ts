@@ -1,6 +1,7 @@
 import { Middleware } from '../http/Middleware';
 import { Request, ValidateMap } from '../http/types';
 import { ValidationResult } from '../http/Validator';
+import { ValidationError } from '../errors';
 
 export class ValidateMiddleware extends Middleware {
     readonly _kind = 'validate' as const;
@@ -49,7 +50,7 @@ export class ValidateMiddleware extends Middleware {
         }
 
         if (Object.keys(mergedErrors).length > 0) {
-            return Response.json({ errors: mergedErrors }, { status: 400 });
+            throw new ValidationError(mergedErrors);
         }
 
         for (const { source, result } of results) {

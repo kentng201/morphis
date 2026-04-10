@@ -5,6 +5,12 @@ import { ConnectMiddleware } from '../middlewares/ConnectMiddleware';
 import { Middleware } from './Middleware';
 import { current, runWithContext } from './Context';
 import { ROUTE_KEY } from './metadata';
+import {
+    createErrorResponse,
+    defaultErrorFormatter,
+    type ErrorFormatter,
+    NotFoundError,
+} from '../errors';
 
 interface RouteEntry {
     method: HttpMethod;
@@ -46,6 +52,7 @@ function resolveRouteKey(fn: Function): { method: HttpMethod; path: string } | n
 export class Router {
     private routes: RouteEntry[] = [];
     private globalMiddlewares: Middleware[] = [];
+    private errorFormatter: ErrorFormatter = defaultErrorFormatter;
 
     /**
      * Register a global middleware that wraps every request.
@@ -60,6 +67,11 @@ export class Router {
         } else {
             this.globalMiddlewares.push(middleware);
         }
+        return this;
+    }
+
+    setErrorFormatter(formatter: ErrorFormatter): this {
+        this.errorFormatter = formatter;
         return this;
     }
 
@@ -248,9 +260,13 @@ export class Router {
                     (next, mw) => (req: Request) => mw.handler(req, next),
                     noopHandler as (req: Request) => Promise<unknown>,
                 );
-                const result = await chain(preflightReq);
-                if (result instanceof Response) return result;
-                return new Response(null, { status: 204 });
+                try {
+                    const result = await chain(preflightReq);
+                    if (result instanceof Response) return result;
+                    return new Response(null, { status: 204 });
+                } catch (err) {
+                    return this.serializeError(err, preflightReq);
+                }
             }
 
             for (const route of this.routes) {
@@ -292,15 +308,35 @@ export class Router {
                     if (result instanceof Response) return result;
                     return Response.json(result, { status: 200 });
                 } catch (err) {
-                    console.error('[Router] Handler error:', err);
-                    return Response.json({ error: 'Internal server error' }, { status: 500 });
+                    return this.serializeError(err, appReq);
                 } finally {
                     const trace = current.trace;
                     if (trace?.[trace.length - 1] === route.traceCaller) trace.pop();
                 }
             }
 
-            return Response.json({ error: 'Not found' }, { status: 404 });
+            const notFoundReq: Request = {
+                raw: rawReq,
+                path: pathname,
+                headers: rawReq.headers,
+                params: {},
+                query: Object.fromEntries(url.searchParams),
+                body: undefined,
+            };
+
+            return this.serializeError(
+                new NotFoundError('Not found', {
+                    details: { path: pathname, method },
+                }),
+                notFoundReq,
+            );
         });
+    }
+
+    private serializeError(error: unknown, request: Request): Promise<Response> {
+        return createErrorResponse(error, {
+            request,
+            trackId: current.trackId,
+        }, this.errorFormatter);
     }
 }

@@ -27,6 +27,7 @@ import { runNewServer } from './commands/newServer';
 import { runKillThread } from './commands/killThread';
 import { runDockerBuild } from './commands/dockerBuild';
 import { runDeploy } from './commands/deploy';
+import { maybeCheckCliUpdate } from './utils/updateCheck';
 import {
     getAvailableEnvFiles as listAvailableEnvFiles,
     getAvailableServers as listAvailableServers,
@@ -441,4 +442,5 @@ if (!cmd) {
     process.exit(1);
 }
 
+await maybeCheckCliUpdate();
 await cmd.run();

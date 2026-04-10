@@ -1,4 +1,4 @@
-type Path<T, K extends string> = K extends `${infer Key}.${infer Rest}`
+export type Path<T, K extends string> = K extends `${infer Key}.${infer Rest}`
     ? Key extends keyof T
     ? Path<T[Key] | T[Key][], Rest>
     : never
@@ -7,7 +7,7 @@ type Path<T, K extends string> = K extends `${infer Key}.${infer Rest}`
     : never;
 
 
-type DotNotationType<T, K extends string> = K extends `${infer Key}.${infer Rest}`
+export type DotNotationType<T, K extends string> = K extends `${infer Key}.${infer Rest}`
     ? T extends Array<infer U>
     ? DotNotationType<U, K>
     : Key extends keyof T
@@ -21,9 +21,9 @@ type DotNotationType<T, K extends string> = K extends `${infer Key}.${infer Rest
     : T[K]
     : never;
 
-type ValidDotNotation<T, K extends string> = K & (DotNotationType<T, K> extends never ? never : string);
+export type ValidDotNotation<T, K extends string> = K & (DotNotationType<T, K> extends never ? never : string);
 
-type ValidDotNotationArray<T, K extends string[]> = K & (K extends [infer First extends string, ...infer Rest extends string[]]
+export type ValidDotNotationArray<T, K extends string[]> = K & (K extends [infer First extends string, ...infer Rest extends string[]]
     ? ValidDotNotationArray<T, Rest> extends never
     ? never
     : ValidDotNotation<T, First> extends never

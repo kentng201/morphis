@@ -1,6 +1,7 @@
 import { Middleware } from '../http/Middleware';
 import { current } from '../http/Context';
 import type { Request } from '../http/types';
+import { normalizeError } from '../errors';
 
 export class TrackMiddleware extends Middleware {
     /**
@@ -47,7 +48,7 @@ export class TrackMiddleware extends Middleware {
 
 
     async handler(req: Request, next: (req: Request) => Promise<unknown>): Promise<unknown> {
-        const trackId = Math.random().toString(36).substring(2, 10);
+        const trackId = current.trackId ?? Math.random().toString(36).substring(2, 10);
         current.trackId = trackId;
 
         const withTrackId = (response: globalThis.Response): globalThis.Response => {
@@ -60,8 +61,8 @@ export class TrackMiddleware extends Middleware {
         try {
             res = await next(req);
         } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            const errName = err instanceof Error && err.name && err.name !== 'Error' ? ` [${err.name}]` : '';
+            const normalized = normalizeError(err);
+            const errName = normalized.name && normalized.name !== 'Error' ? ` [${normalized.name}]` : '';
 
             const extras: string[] = [];
             if (err instanceof Error) {
@@ -86,11 +87,14 @@ export class TrackMiddleware extends Middleware {
                 }
             }
 
+            if (normalized.details !== undefined) {
+                extras.push(`Details: ${JSON.stringify(normalized.details)}`);
+            }
+
             const detail = extras.length > 0 ? `\n  ${extras.join('\n  ')}` : '';
-            console.error(`Error${errName}: ${message}${detail}\nStack: ${err instanceof Error ? err.stack?.split('\n').join('\t\t\t\n') : 'No stack trace available'}`);
-            return withTrackId(Response.json({ error: message }, { status: 500 }));
+            console.error(`Error${errName}: ${normalized.message}${detail}\nStack: ${err instanceof Error ? err.stack?.split('\n').join('\t\t\t\n') : 'No stack trace available'}`);
+            throw err;
         }
-        delete current.trackId;
 
         if (res instanceof globalThis.Response) {
             return withTrackId(res);

@@ -3,6 +3,7 @@ import type { Request } from '../http/types';
 import { current } from '../http/Context';
 import { ConnectionMiddleware } from './ConnectionMiddleware';
 import { ConnectionManager } from '../db/ConnectionManager';
+import { ServiceUnavailableError } from '../errors';
 
 export class ConnectMiddleware extends Middleware {
     readonly _kind = 'connect' as const;
@@ -47,12 +48,14 @@ export class ConnectMiddleware extends Middleware {
             try {
                 entry = await ConnectionManager.get(this.connectionName);
             } catch (err) {
-                return Response.json(
+                throw new ServiceUnavailableError(
+                    `Database connection "${this.connectionName}" is not available: ${err instanceof Error ? err.message : String(err)}`,
                     {
-                        error: `Database connection "${this.connectionName}" is not available: ${err instanceof Error ? err.message : String(err)
-                            }`,
+                        details: {
+                            connectionName: this.connectionName,
+                        },
+                        cause: err,
                     },
-                    { status: 503 },
                 );
             }
         }

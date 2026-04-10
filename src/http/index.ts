@@ -7,3 +7,4 @@ export { Validator } from './Validator';
 export type { EndpointMiddleware } from './decorators';
 export type { Request, RawRequest, RouteDefinition, HttpMethod, ValidateMap, TransformMap } from './types';
 export type { ValidationRule, ValidationResult, SimpleValidationRuleMap } from './Validator';
+export type { ErrorFormatter, ErrorFormatterContext, FormattedError, HttpErrorOptions, NormalizedError } from '../errors';

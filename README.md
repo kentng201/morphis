@@ -59,6 +59,8 @@ Each `.env.<server>` file defines an independent server. When you need per-envir
 bun install -g morphis
 ```
 
+Morphis may print a CLI update notice before running commands when a newer global release is available. The suggested upgrade command only updates the global CLI install and does not touch project dependencies.
+
 **Create a new project:**
 
 ```bash

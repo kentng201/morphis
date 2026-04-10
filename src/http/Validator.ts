@@ -1,3 +1,5 @@
+import type { DotNotationType } from '../types/DotNotation';
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SimpleRules — declarative per-field validation enum
 // ═══════════════════════════════════════════════════════════════════════════════
