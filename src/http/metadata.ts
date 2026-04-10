@@ -12,3 +12,6 @@ export const routeMeta = new Map<Function, RouteDefinition[]>();
  * resolve metadata via fn[ROUTE_KEY].
  */
 export const ROUTE_KEY = Symbol('morphis:route');
+
+/** Symbol stamped onto handler functions by @Validate so validation metadata can be inspected later. */
+export const VALIDATE_KEY = Symbol('morphis:validate');

@@ -10,6 +10,52 @@ export interface RouteDefinition {
     handlerKey: string;
 }
 
+export type ValidationSource = keyof ValidateMap;
+export type SchemaScalarType = 'string' | 'number' | 'boolean' | 'array';
+
+export interface ValidationCriterion {
+    type: string;
+    value?: number;
+    min?: number;
+    max?: number;
+    values?: unknown[];
+    pattern?: string;
+}
+
+export interface ValidationFieldMetadata {
+    path: string;
+    type?: SchemaScalarType;
+    required: boolean;
+    optional: boolean;
+    nullable: boolean;
+    nullish: boolean;
+    criteria: ValidationCriterion[];
+    unsupportedRules: string[];
+}
+
+export interface ValidationSourceMetadata {
+    source: ValidationSource;
+    validatorName: string;
+    strictCheck: boolean;
+    duplicateError: boolean;
+    customRuleCount: number;
+    hasObjectRules: boolean;
+    fields: ValidationFieldMetadata[];
+}
+
+export interface RouteSpec {
+    method: HttpMethod;
+    path: string;
+    action: string;
+    traceCaller: string;
+    middlewares: string[];
+    globalMiddlewares: string[];
+    pathParams: string[];
+    controllerName?: string;
+    handlerKey?: string;
+    validation: Partial<Record<ValidationSource, ValidationSourceMetadata>>;
+}
+
 /** The native Web/Bun Request class — use `req.raw` to access it. */
 export type RawRequest = globalThis.Request;
 

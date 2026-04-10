@@ -2,21 +2,32 @@
  * List all registered HTTP endpoints for a given server.
  *
  * Usage:
- *   bun scripts/listRoutes.ts --server=api
+ *   bun scripts/listRoutes.ts --server=api [--format=table|json|openapi]
  */
 
 import path from 'path';
-import { HttpMethod } from '../../src';
+import type { HttpMethod, RouteSpec } from '../../src/http/types';
+import { buildOpenApiDocument } from '../../src/http/openapi';
 
 const serverArg = process.argv.find(a => a.startsWith('--server='));
 const server = serverArg ? serverArg.split('=')[1] : null;
+const formatArg = process.argv.find(a => a.startsWith('--format='));
+const format = formatArg ? formatArg.split('=')[1] : 'table';
+const titleArg = process.argv.find(a => a.startsWith('--title='));
+const versionArg = process.argv.find(a => a.startsWith('--version='));
+const descriptionArg = process.argv.find(a => a.startsWith('--description='));
 
 // Disable LoggerMiddleware console patching for route listing
 process.argv.push('--skip-logger');
 
 if (!server) {
     console.error('[listRoutes] Missing --server=<name> argument.');
-    console.error('  Example: bun scripts/listRoutes.ts --server=api');
+    console.error('  Example: bun scripts/listRoutes.ts --server=api --format=json');
+    process.exit(1);
+}
+
+if (!['table', 'json', 'openapi'].includes(format)) {
+    console.error(`[listRoutes] Unsupported --format=${format}. Use table, json, or openapi.`);
     process.exit(1);
 }
 
@@ -45,6 +56,18 @@ interface RouteInfo {
 }
 
 const routes: RouteInfo[] = router.getRoutes();
+const routeSpecs: RouteSpec[] = typeof router.getRouteSpecs === 'function'
+    ? await router.getRouteSpecs()
+    : routes.map(route => ({
+        method: route.method,
+        path: route.path,
+        action: route.action,
+        traceCaller: route.action,
+        middlewares: route.middlewares,
+        globalMiddlewares: [],
+        pathParams: [],
+        validation: {},
+    }));
 const globalMwNames: string[] = typeof router.getGlobalMiddlewares === 'function'
     ? router.getGlobalMiddlewares()
     : [];
@@ -82,6 +105,24 @@ function row(domain: string, method: string, endpoint: string, action: string, m
         pad(action, COL_ACTION),
         pad(middleware, COL_MIDDLEWARE),
     ].join(' | ');
+}
+
+if (format === 'json') {
+    console.log(JSON.stringify({
+        server,
+        routes: routeSpecs,
+    }, null, 2));
+    process.exit(0);
+}
+
+if (format === 'openapi') {
+    const document = buildOpenApiDocument(server, routeSpecs, {
+        title: titleArg ? titleArg.split('=')[1] : undefined,
+        version: versionArg ? versionArg.split('=')[1] : undefined,
+        description: descriptionArg ? descriptionArg.split('=')[1] : undefined,
+    });
+    console.log(JSON.stringify(document, null, 2));
+    process.exit(0);
 }
 
 console.log();

@@ -1,6 +1,6 @@
 import { Middleware } from '../http/Middleware';
 import { Request, RouteDefinition } from '../http/types';
-import { controllerMeta, routeMeta, ROUTE_KEY } from '../http/metadata';
+import { controllerMeta, routeMeta, ROUTE_KEY, VALIDATE_KEY } from '../http/metadata';
 import { normalizePath } from './HttpMethodMiddleware';
 
 export class ControllerMiddleware extends Middleware {
@@ -36,6 +36,9 @@ export class ControllerMiddleware extends Middleware {
                     get() {
                         const bound = fn.bind(this);
                         (bound as any)[ROUTE_KEY] = routeKeyValue;
+                        if ((fn as any)[VALIDATE_KEY]) {
+                            (bound as any)[VALIDATE_KEY] = (fn as any)[VALIDATE_KEY];
+                        }
                         return bound;
                     },
                     configurable: true,

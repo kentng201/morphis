@@ -1,6 +1,7 @@
 import { Middleware } from '../http/Middleware';
 import { Request, ValidateMap } from '../http/types';
 import { ValidationResult } from '../http/Validator';
+import { ROUTE_KEY, VALIDATE_KEY } from '../http/metadata';
 import { ValidationError } from '../errors';
 
 export class ValidateMiddleware extends Middleware {
@@ -73,9 +74,14 @@ export class ValidateMiddleware extends Middleware {
     ): PropertyDescriptor {
         const original: (req: Request) => unknown = descriptor.value;
         const self = this;
-        descriptor.value = async function (this: unknown, req: Request) {
+        const wrapped = async function (this: unknown, req: Request) {
             return self.handler(req, (r) => Promise.resolve(original.call(this, r)));
         };
+        (wrapped as any)[VALIDATE_KEY] = self.map;
+        if ((original as any)[ROUTE_KEY]) {
+            (wrapped as any)[ROUTE_KEY] = (original as any)[ROUTE_KEY];
+        }
+        descriptor.value = wrapped;
         return descriptor;
     }
 }
@@ -87,6 +93,6 @@ export class ValidateMiddleware extends Middleware {
  * \@Validate({ headers: AuthValidator, body: OrderValidator })
  * async create(req: Request) { ... }
  */
-export function Validate(map: ValidateMap): ValidateMiddleware & MethodDecorator {
+export function Validate(map: ValidateMap = {}): ValidateMiddleware & MethodDecorator {
     return new ValidateMiddleware(map) as ValidateMiddleware & MethodDecorator;
 }

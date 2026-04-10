@@ -1,4 +1,12 @@
 import type { DotNotationType } from '../types/DotNotation';
+import type {
+    SchemaScalarType,
+    ValidateMap,
+    ValidationCriterion,
+    ValidationFieldMetadata,
+    ValidationSource,
+    ValidationSourceMetadata,
+} from './types';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SimpleRules — declarative per-field validation enum
@@ -378,6 +386,172 @@ function buildFieldRules<T>(fullKey: string, token: string, rawValues: Array<Any
 function toRawValues(mapValue: SimpleRuleValue): Array<AnySimpleRule | ValidationRule<any>> {
     if (Array.isArray(mapValue)) return mapValue as Array<AnySimpleRule | ValidationRule<any>>;
     return [mapValue as AnySimpleRule];
+}
+
+function inferSchemaType(criteria: ValidationCriterion[]): SchemaScalarType | undefined {
+    const types = new Set<SchemaScalarType>();
+
+    for (const criterion of criteria) {
+        switch (criterion.type) {
+            case 'email':
+            case 'alphanumeric':
+            case 'uppercase':
+            case 'lowercase':
+            case 'noSpecialCharacters':
+            case 'regex':
+            case 'length':
+            case 'date':
+                types.add('string');
+                break;
+            case 'numeric':
+            case 'positive':
+            case 'negative':
+            case 'max':
+            case 'min':
+            case 'between':
+            case 'decimals':
+            case 'greaterThan':
+            case 'greaterThanOrEqual':
+            case 'lessThan':
+            case 'lessThanOrEqual':
+                types.add('number');
+                break;
+            case 'boolean':
+                types.add('boolean');
+                break;
+            case 'size':
+                types.add('array');
+                break;
+            case 'in':
+            case 'enum': {
+                const values = criterion.values ?? [];
+                if (values.length === 0) break;
+                const primitiveTypes = new Set(values.map(value => Array.isArray(value) ? 'array' : typeof value));
+                if (primitiveTypes.size === 1) {
+                    const [primitiveType] = [...primitiveTypes];
+                    if (primitiveType === 'string' || primitiveType === 'number' || primitiveType === 'boolean') {
+                        types.add(primitiveType);
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    return types.size === 1 ? [...types][0] : undefined;
+}
+
+function toCriterion(rule: AnySimpleRule): ValidationCriterion {
+    if (typeof rule === 'string') {
+        return { type: rule };
+    }
+
+    switch (rule.type) {
+        case 'regex':
+            return { type: rule.type, pattern: rule.pattern.source };
+        case 'in':
+            return { type: rule.type, values: [...rule.values] };
+        case 'between':
+        case 'decimals':
+        case 'length':
+        case 'size':
+            return { type: rule.type, min: rule.min, max: rule.max };
+        case 'enum':
+            return { type: rule.type, values: Object.values(rule.enumObj) };
+        case 'max':
+        case 'min':
+        case 'greaterThan':
+        case 'greaterThanOrEqual':
+        case 'lessThan':
+        case 'lessThanOrEqual':
+            return { type: rule.type, value: rule.value };
+        default:
+            return { type: rule.type };
+    }
+}
+
+function buildFieldMetadata(path: string, rawValues: Array<AnySimpleRule | ValidationRule<any>>): ValidationFieldMetadata {
+    const criteria = rawValues.filter((value): value is AnySimpleRule => !isValidationRule(value)).map(toCriterion);
+    const criterionTypes = new Set(criteria.map(criterion => criterion.type));
+
+    return {
+        path,
+        type: inferSchemaType(criteria),
+        required: criterionTypes.has('required'),
+        optional: criterionTypes.has('optional') || criterionTypes.has('nullish'),
+        nullable: criterionTypes.has('nullable') || criterionTypes.has('nullish'),
+        nullish: criterionTypes.has('nullish'),
+        criteria,
+        unsupportedRules: rawValues.filter(isValidationRule).map(rule => rule.message),
+    };
+}
+
+function inspectSimpleRuleMap<T>(
+    map: SimpleValidationRuleMap<T>,
+    prefix = '',
+    fields: ValidationFieldMetadata[] = [],
+): ValidationFieldMetadata[] {
+    for (const [mapKey, mapValue] of Object.entries(map)) {
+        const fullKey = prefix ? `${prefix}.${mapKey}` : mapKey;
+        if (isValidationRule(mapValue)) {
+            fields.push({
+                path: fullKey,
+                type: undefined,
+                required: false,
+                optional: false,
+                nullable: false,
+                nullish: false,
+                criteria: [],
+                unsupportedRules: [mapValue.message],
+            });
+            continue;
+        }
+
+        if (isNestedSimpleRuleMap(mapValue)) {
+            inspectSimpleRuleMap(mapValue as SimpleValidationRuleMap<T>, fullKey, fields);
+            continue;
+        }
+
+        fields.push(buildFieldMetadata(fullKey, toRawValues(mapValue as SimpleRuleValue)));
+    }
+
+    return fields;
+}
+
+export async function inspectValidator<T>(
+    ValidatorClass: new () => Validator<T>,
+    source: ValidationSource,
+): Promise<ValidationSourceMetadata> {
+    const instance = new ValidatorClass();
+    const fields = inspectSimpleRuleMap(instance.getSimpleRules()).sort((left, right) => left.path.localeCompare(right.path));
+    const customRules = await Promise.resolve(instance.getRules());
+
+    return {
+        source,
+        validatorName: ValidatorClass.name || 'AnonymousValidator',
+        strictCheck: instance.strictCheck,
+        duplicateError: instance.duplicateError,
+        customRuleCount: customRules.length,
+        hasObjectRules: customRules.some(rule => rule.key === undefined),
+        fields,
+    };
+}
+
+export async function inspectValidateMap(
+    map?: ValidateMap,
+): Promise<Partial<Record<ValidationSource, ValidationSourceMetadata>>> {
+    if (!map) return {};
+
+    const entries = await Promise.all(
+        (Object.entries(map) as Array<[ValidationSource, ValidateMap[ValidationSource]]>)
+            .filter(([, ValidatorClass]) => Boolean(ValidatorClass))
+            .map(async ([source, ValidatorClass]) => {
+                const metadata = await inspectValidator(ValidatorClass as new () => Validator<any>, source);
+                return [source, metadata] as const;
+            }),
+    );
+
+    return Object.fromEntries(entries);
 }
 
 function expandSimpleRules<T>(map: SimpleValidationRuleMap<T>): ValidationRule<T>[] {

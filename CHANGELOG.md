@@ -4,7 +4,7 @@ Generated from git tags, commit history, and code-level diffs in this repository
 
 ## Unreleased
 - Added centralized framework error primitives and router-level error serialization so controllers, middlewares, and services can throw typed errors with status codes, headers, and custom response bodies.
-- Added first-class `ValidationError`, `NotFoundError`, and `ServiceUnavailableError` support while keeping the existing default JSON shapes for validation and general errors.
+- Expanded first-class HTTP errors to cover the full standard 4xx/5xx status-code set, and added helpers to map status codes into default messages and framework error instances.
 - Changed validation and connection middleware to throw typed errors instead of returning ad-hoc JSON responses, and updated Track middleware to log and rethrow so the router is the single HTTP error formatter.
 
 Note: `v.0.3.0` is a duplicate historical tag that points to the same release commit as `v0.3.0`.

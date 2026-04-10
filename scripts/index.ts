@@ -250,10 +250,16 @@ const commands: Record<string, CommandDef> = {
     // ── Route listing ────────────────────────────────────────────────────────
     'route:list': {
         description: 'List all registered HTTP routes for a server',
-        usage: 'morphis route:list --server=<name>',
+        usage: 'morphis route:list --server=<name> [--format=table|json|openapi] [--title=<name>] [--version=<semver>] [--description=<text>]',
         run() {
             const server = requireServer();
-            spawnBun([path.join(scriptsDir, 'commands', 'listRoutes.ts'), `--server=${server}`]);
+            const passthroughArgs = rest.filter(arg =>
+                arg.startsWith('--format=')
+                || arg.startsWith('--title=')
+                || arg.startsWith('--version=')
+                || arg.startsWith('--description='),
+            );
+            spawnBun([path.join(scriptsDir, 'commands', 'listRoutes.ts'), `--server=${server}`, ...passthroughArgs]);
         },
     },
 
@@ -416,6 +422,8 @@ function printHelp() {
     console.log(chalk.gray('    morphis migrate'));
     console.log(chalk.gray('    morphis migrate                             --connection=analytics-db'));
     console.log(chalk.gray('    morphis route:list      --server=api'));
+    console.log(chalk.gray('    morphis route:list      --server=api --format=json'));
+    console.log(chalk.gray('    morphis route:list      --server=api --format=openapi --title="NDM API"'));
     console.log(chalk.gray('    morphis build           --server=chat --env=stg'));
     console.log(chalk.gray('    morphis dev             --server=mini --env=dev'));
     console.log(chalk.gray('    morphis start           --env-file=.env.dev.api'));

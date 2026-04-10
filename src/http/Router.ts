@@ -1,10 +1,11 @@
-import { HttpMethod, Request, RawRequest } from './types';
+import { HttpMethod, Request, RawRequest, RouteSpec, ValidateMap } from './types';
 import { HttpMethodMiddleware, ValidateMiddleware, EndpointMiddleware } from './decorators';
 import { TransformerMiddleware } from '../middlewares/TransformerMiddleware';
 import { ConnectMiddleware } from '../middlewares/ConnectMiddleware';
 import { Middleware } from './Middleware';
 import { current, runWithContext } from './Context';
-import { ROUTE_KEY } from './metadata';
+import { ROUTE_KEY, VALIDATE_KEY } from './metadata';
+import { inspectValidateMap } from './Validator';
 import {
     createErrorResponse,
     defaultErrorFormatter,
@@ -21,6 +22,9 @@ interface RouteEntry {
     action: string;
     traceCaller: string;
     middlewares: string[];
+    controllerName?: string;
+    handlerKey?: string;
+    validateMap?: ValidateMap;
 }
 
 /** Map from resource method name → HTTP verb + path suffix */
@@ -47,6 +51,12 @@ function resolveRouteKey(fn: Function): { method: HttpMethod; path: string } | n
     const meta = (fn as any)[ROUTE_KEY];
     if (!meta) return null;
     return meta;
+}
+
+function resolveValidateMap(fn: Function): ValidateMap | undefined {
+    const map = (fn as any)[VALIDATE_KEY] as ValidateMap | undefined;
+    if (!map) return undefined;
+    return Object.keys(map).length > 0 ? map : undefined;
 }
 
 export class Router {
@@ -82,9 +92,26 @@ export class Router {
         action: string,
         middlewares: string[] = [],
         traceCaller: string = action,
+        options: {
+            controllerName?: string;
+            handlerKey?: string;
+            validateMap?: ValidateMap;
+        } = {},
     ): this {
         const { pattern, paramNames } = buildPattern(path);
-        this.routes.push({ method, path, pattern, paramNames, handler, action, traceCaller, middlewares });
+        this.routes.push({
+            method,
+            path,
+            pattern,
+            paramNames,
+            handler,
+            action,
+            traceCaller,
+            middlewares,
+            controllerName: options.controllerName,
+            handlerKey: options.handlerKey,
+            validateMap: options.validateMap,
+        });
         return this;
     }
 
@@ -96,6 +123,23 @@ export class Router {
     /** Returns the names of all global middlewares registered via use(). */
     getGlobalMiddlewares(): string[] {
         return this.globalMiddlewares.map(m => m.constructor.name);
+    }
+
+    async getRouteSpecs(): Promise<RouteSpec[]> {
+        const globalMiddlewares = this.getGlobalMiddlewares();
+
+        return Promise.all(this.routes.map(async route => ({
+            method: route.method,
+            path: route.path,
+            action: route.action,
+            traceCaller: route.traceCaller,
+            middlewares: [...route.middlewares],
+            globalMiddlewares: [...globalMiddlewares],
+            pathParams: [...route.paramNames],
+            controllerName: route.controllerName,
+            handlerKey: route.handlerKey,
+            validation: await inspectValidateMap(route.validateMap),
+        })));
     }
 
     /**
@@ -153,6 +197,14 @@ export class Router {
             .map(m => m.constructor.name);
     }
 
+    private collectValidateMap(middlewares: EndpointMiddleware[]): ValidateMap | undefined {
+        const map = middlewares
+            .filter((middleware): middleware is ValidateMiddleware => (middleware as any)._kind === 'validate')
+            .reduce<ValidateMap>((merged, middleware) => Object.assign(merged, middleware.map), {});
+
+        return Object.keys(map).length > 0 ? map : undefined;
+    }
+
     /**
      * Register an inline handler with a middleware array.
      * The array must contain at least one method middleware (e.g. get('/path'))
@@ -172,7 +224,9 @@ export class Router {
         const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
         const action = handler.name.replace(/^bound\s+/, '') || '<anonymous>';
         const mwNames = this.collectMiddlewareNames(middlewares);
-        return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames, action);
+        return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames, action, {
+            validateMap: this.collectValidateMap(middlewares),
+        });
     }
 
     /** Register a controller method, or an inline handler with options.middlewares. */
@@ -192,7 +246,9 @@ export class Router {
             const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
             const action = fn.name.replace(/^bound\s+/, '') || '<anonymous>';
             const mwNames = this.collectMiddlewareNames(middlewares);
-            return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames, action);
+            return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames, action, {
+                validateMap: this.collectValidateMap(middlewares),
+            });
         }
         const meta = resolveRouteKey(fn) as any;
         if (!meta) {
@@ -205,7 +261,11 @@ export class Router {
         const traceCaller = meta.controllerName
             ? `${meta.controllerName}.${meta.handlerKey}`
             : action;
-        return this.addRoute(meta.method, meta.path, fn, action, [], traceCaller);
+        return this.addRoute(meta.method, meta.path, fn, action, [], traceCaller, {
+            controllerName: meta.controllerName,
+            handlerKey: meta.handlerKey,
+            validateMap: resolveValidateMap(fn),
+        });
     }
 
     /**
@@ -232,7 +292,11 @@ export class Router {
                 ? `${controllerName[0].toLowerCase()}${controllerName.slice(1)}.${name}`
                 : name;
             const traceCaller = controllerName ? `${controllerName}.${name}` : action;
-            this.addRoute(method, fullPath, fn as (req: Request) => unknown, action, [], traceCaller);
+            this.addRoute(method, fullPath, fn as (req: Request) => unknown, action, [], traceCaller, {
+                controllerName,
+                handlerKey: name,
+                validateMap: resolveValidateMap(fn),
+            });
         }
         return this;
     }
