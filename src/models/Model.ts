@@ -11,6 +11,10 @@ function toSnakeCase(str: string): string {
         .toLowerCase();
 }
 
+function toCamelCase(str: string): string {
+    return str.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+}
+
 function pluralize(word: string): string {
     if (/[^aeiou]y$/i.test(word)) return word.slice(0, -1) + 'ies';
     if (/(s|sh|ch|x|z)$/i.test(word)) return word + 'es';
@@ -184,7 +188,7 @@ async function buildDrizzleTable(driver: string, tableName: string, columns: Col
     const columnDefs: Record<string, any> = {};
 
     for (const col of columns) {
-        columnDefs[col.name] = buildColumn(coreMod, driver, col);
+        columnDefs[col.name] = await buildColumn(coreMod, driver, col);
     }
 
     return createTable(tableName, columnDefs);
@@ -194,7 +198,7 @@ async function buildDrizzleTable(driver: string, tableName: string, columns: Col
  * Map a single column's SQL type to a Drizzle column builder call.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function buildColumn(mod: any, driver: string, col: ColumnMeta): any {
+async function buildColumn(mod: any, driver: string, col: ColumnMeta): Promise<any> {
     const t = col.type.toUpperCase();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let c: any;
@@ -237,6 +241,18 @@ function buildColumn(mod: any, driver: string, col: ColumnMeta): any {
         c = mod.text(col.name);
     }
 
+    const rawDefault = typeof col.defaultValue === 'string' ? col.defaultValue.trim() : col.defaultValue;
+    if (rawDefault !== null && rawDefault !== undefined && rawDefault !== '' && typeof c.default === 'function') {
+        const drizzleMod = await importFromProject('drizzle-orm');
+        const { sql } = drizzleMod;
+        const normalizedDefault = String(rawDefault).replace(/^\((.*)\)$/s, '$1').trim();
+        const isCurrentTimeDefault = /^(CURRENT_TIMESTAMP|CURRENT_DATE|CURRENT_TIME|NOW\(\))$/i.test(normalizedDefault);
+
+        c = isCurrentTimeDefault && typeof c.defaultNow === 'function'
+            ? c.defaultNow()
+            : c.default(sql.raw(normalizedDefault));
+    }
+
     if (col.primaryKey) c = c.primaryKey();
     if (!col.nullable) c = c.notNull();
 
@@ -259,13 +275,65 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolveTableKey(table: any, key: string): string | undefined {
+    if (!table || typeof table !== 'object') return undefined;
+    if (key in table) return key;
+
+    const snakeKey = toSnakeCase(key);
+    if (snakeKey in table) return snakeKey;
+
+    const camelKey = toCamelCase(key);
+    if (camelKey in table) return camelKey;
+
+    for (const [candidateKey, column] of Object.entries(table as Record<string, unknown>)) {
+        const columnName = (column as { name?: string })?.name;
+        if (typeof columnName !== 'string') continue;
+        if (columnName === key || columnName === snakeKey || toCamelCase(columnName) === key) {
+            return candidateKey;
+        }
+    }
+
+    return undefined;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolveTableColumn(table: any, key: string): any {
+    const resolvedKey = resolveTableKey(table, key);
+    return resolvedKey ? table[resolvedKey] : undefined;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function normalizeInputRecord(table: any, values: Record<string, any>): Record<string, any> {
+    if (!isPlainObject(values)) return values;
+
+    const normalized: Record<string, any> = {};
+    for (const [key, value] of Object.entries(values)) {
+        normalized[resolveTableKey(table, key) ?? key] = value;
+    }
+    return normalized;
+}
+
+function normalizeOutputRecord<T extends Record<string, unknown>>(row: T): T {
+    const normalized: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(row)) {
+        const outputKey = key.includes('_') ? toCamelCase(key) : key;
+        if (!(outputKey in normalized)) {
+            normalized[outputKey] = value;
+        }
+    }
+
+    return normalized as T;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function normalizeWhere(table: any, where: unknown): Promise<any> {
     if (!isPlainObject(where)) return where;
 
     const drizzleMod = await importFromProject('drizzle-orm');
     const { and, eq, isNull } = drizzleMod;
     const predicates = Object.entries(where).map(([key, value]) => {
-        const column = table[key];
+        const column = resolveTableColumn(table, key);
         if (!column) {
             throw new Error(`Unknown column "${key}" in where clause`);
         }
@@ -531,7 +599,7 @@ export class ModelInstance {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     constructor(modelClass: typeof Model, data: Record<string, any>) {
         this._modelClass = modelClass;
-        Object.assign(this, data);
+        Object.assign(this, normalizeOutputRecord(data));
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -546,9 +614,11 @@ export class ModelInstance {
 
         const eqMod = await importFromProject('drizzle-orm');
         const eq = eqMod.eq;
+        const normalizedValues = normalizeInputRecord(table, values);
+        const primaryKeyValue = this[pkCol.name] ?? this[toCamelCase(pkCol.name)];
 
-        const result = await db.update(table).set(values).where(eq(pkCol, this[pkCol.name])).returning();
-        const row = result[0] ?? { ...this, ...values };
+        const result = await db.update(table).set(normalizedValues).where(eq(pkCol, primaryKeyValue)).returning();
+        const row = normalizeOutputRecord(result[0] ?? { ...this, ...normalizedValues });
         Object.assign(this, row);
         return this;
     }
@@ -564,8 +634,9 @@ export class ModelInstance {
 
         const eqMod = await importFromProject('drizzle-orm');
         const eq = eqMod.eq;
+        const primaryKeyValue = this[pkCol.name] ?? this[toCamelCase(pkCol.name)];
 
-        await db.delete(table).where(eq(pkCol, this[pkCol.name]));
+        await db.delete(table).where(eq(pkCol, primaryKeyValue));
     }
 
     toJSON(): Record<string, unknown> {
@@ -775,8 +846,9 @@ export class Model {
     static async create(this: any, values: Record<string, any>): Promise<ModelInstance> {
         return withModelTrace(this.name, 'create', async () => {
             await this.initialize();
-            const result = await this._drizzle.insert(this.table).values(values).returning();
-            return new ModelInstance(this, result[0] ?? values);
+            const normalizedValues = normalizeInputRecord(this.table, values);
+            const result = await this._drizzle.insert(this.table).values(normalizedValues).returning();
+            return new ModelInstance(this, result[0] ?? normalizeOutputRecord(normalizedValues));
         });
     }
 
@@ -784,7 +856,8 @@ export class Model {
     static async bulkCreate(this: any, records: Record<string, any>[]): Promise<ModelInstance[]> {
         return withModelTrace(this.name, 'bulkCreate', async () => {
             await this.initialize();
-            const result = await this._drizzle.insert(this.table).values(records).returning();
+            const normalizedRecords = records.map((record: Record<string, any>) => normalizeInputRecord(this.table, record));
+            const result = await this._drizzle.insert(this.table).values(normalizedRecords).returning();
             return result.map((r: Record<string, unknown>) => new ModelInstance(this, r));
         });
     }
@@ -793,11 +866,12 @@ export class Model {
     static async update(this: any, values: Record<string, any>, options: Pick<QueryOptions, 'where'>): Promise<any[]> {
         return withModelTrace(this.name, 'update', async () => {
             await this.initialize();
-            let query = this._drizzle.update(this.table).set(values);
+            const normalizedValues = normalizeInputRecord(this.table, values);
+            let query = this._drizzle.update(this.table).set(normalizedValues);
             const where = await normalizeWhere(this.table, options?.where);
             if (where) query = query.where(where);
             const result = await query.returning();
-            return result;
+            return result.map((row: Record<string, unknown>) => normalizeOutputRecord(row));
         });
     }
 
@@ -809,7 +883,7 @@ export class Model {
             const where = await normalizeWhere(this.table, options?.where);
             if (where) query = query.where(where);
             const result = await query.returning();
-            return result;
+            return result.map((row: Record<string, unknown>) => normalizeOutputRecord(row));
         });
     }
 
@@ -847,15 +921,16 @@ export class Model {
             const pkCol = findPrimaryKeyColumn(this.table);
             if (!pkCol) throw new Error('Cannot upsert: no primary key column found');
 
+            const normalizedValues = normalizeInputRecord(this.table, values);
             const result = await this._drizzle
                 .insert(this.table)
-                .values(values)
+                .values(normalizedValues)
                 .onConflictDoUpdate({
                     target: pkCol,
-                    set: values,
+                    set: normalizedValues,
                 })
                 .returning();
-            return new ModelInstance(this, result[0] ?? values);
+            return new ModelInstance(this, result[0] ?? normalizeOutputRecord(normalizedValues));
         });
     }
 }
