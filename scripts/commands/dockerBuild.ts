@@ -38,8 +38,9 @@ ${adapterCopy}WORKDIR /app
 COPY package.json bun.lockb* ./
 RUN bun install --production --frozen-lockfile 2>/dev/null || bun install --production
 
-# Copy the pre-built bundle
+# Copy the pre-built bundle and runtime config
 COPY dist/${server}/ ./dist/${server}/
+COPY src/config/ ./src/config/
 COPY ${envFile} ${envFile}
 
 RUN sed -i 's/^PORT=.*/${port}/' ${envFile}

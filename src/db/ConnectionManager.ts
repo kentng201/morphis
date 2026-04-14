@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 
 export interface ConnectionEntry {
@@ -34,6 +35,21 @@ function resolveD1Database(conn: any): any {
     return undefined;
 }
 
+function resolveDatabaseConfigPath(cwd: string): string {
+    const override = process.env.MORPHIS_DATABASE_CONFIG_PATH;
+    const candidates = [
+        override
+            ? (path.isAbsolute(override) ? override : path.join(cwd, override))
+            : null,
+        path.join(cwd, 'src', 'config', 'database.ts'),
+        path.join(cwd, 'src', 'config', 'database.js'),
+        path.join(cwd, 'dist', 'config', 'database.ts'),
+        path.join(cwd, 'dist', 'config', 'database.js'),
+    ].filter((value): value is string => Boolean(value));
+
+    return candidates.find(candidate => fs.existsSync(candidate)) ?? candidates[0];
+}
+
 /**
  * Resolve a package from the target (consumer) project's node_modules,
  * then dynamically import it. This ensures morphis never ships its own
@@ -68,7 +84,7 @@ export class ConnectionManager {
         }
 
         const cwd = process.cwd();
-        const configPath = path.join(cwd, 'src', 'config', 'database.ts');
+        const configPath = resolveDatabaseConfigPath(cwd);
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let databases: Record<string, any>;
@@ -77,13 +93,13 @@ export class ConnectionManager {
             databases = mod.default;
         } catch (err) {
             throw new Error(
-                `Failed to load src/config/database.ts: ${err instanceof Error ? err.message : String(err)}`,
+                `Failed to load database config at ${configPath}: ${err instanceof Error ? err.message : String(err)}`,
             );
         }
 
         const entries = Object.entries(databases);
         if (entries.length === 0) {
-            throw new Error('src/config/database.ts has no connections configured');
+            throw new Error(`Database config at ${configPath} has no connections configured`);
         }
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -92,7 +108,7 @@ export class ConnectionManager {
             : databases[connectionName];
 
         if (!config) {
-            throw new Error(`Connection "${connectionName}" not found in src/config/database.ts`);
+            throw new Error(`Connection "${connectionName}" not found in ${configPath}`);
         }
 
         const entry = await ConnectionManager.createDrizzle(config);
