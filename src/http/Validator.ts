@@ -193,14 +193,22 @@ async function runValidation<T>(
 
             const allTokens = [...entry.message.matchAll(/\$(\w+)/g)].map(m => m[1]);
             const tokensToReport = !duplicateError ? allTokens.slice(0, 1) : allTokens;
+            const checkMissing = (entry as { _checkMissing?: boolean })._checkMissing === true;
+            const targets = resolved.length === 0 && checkMissing
+                ? [{ value: undefined, keyPath: entry.key as string }]
+                : resolved;
 
-            for (const [index, { value, keyPath }] of resolved.entries()) {
+            for (const [index, { value, keyPath }] of targets.entries()) {
                 const nullBehavior: NullBehavior | undefined = (entry as any)._nullBehavior;
+                const checkMissing = (entry as { _checkMissing?: boolean })._checkMissing === true;
                 // Default: skip both null and undefined (engine ignores absent/null fields).
                 // Nullable: let null through (predicate handles it); skip undefined.
                 // Nullish:  let both null and undefined through (predicate handles them).
-                if (!nullBehavior && value == null) continue;
-                if (nullBehavior === 'nullable' && value === undefined) continue;
+                // Required: do not short-circuit missing values; the predicate must decide.
+                if (!checkMissing) {
+                    if (!nullBehavior && value == null) continue;
+                    if (nullBehavior === 'nullable' && value === undefined) continue;
+                }
                 if (!(await ruleFn(value, index))) {
                     const msg = substituteMessage(entry.message);
                     if (tokensToReport.length > 0) {
@@ -357,12 +365,14 @@ function buildFieldRules<T>(fullKey: string, token: string, rawValues: Array<Any
 
         const msgTemplate = SIMPLE_RULE_MESSAGES[type];
         const msgText = typeof msgTemplate === 'function' ? msgTemplate(params) : msgTemplate;
+        const isPresenceRule = type === 'required';
 
         const rule: any = {
             key: fullKey,
             rule: (item: unknown) => predicate(item),
             message: `$${token} ${msgText}`,
         };
+        if (isPresenceRule) rule._checkMissing = true;
         if (nullBehavior) rule._nullBehavior = nullBehavior;
         rules.push(rule as ValidationRule<T>);
     }
@@ -615,8 +625,9 @@ export abstract class Validator<T> {
             const declaredKeys = new Set(
                 Object.keys(this.getSimpleRules()).map(k => k.split('.')[0])
             );
-            const sanitized = { ...object as Record<string, unknown> };
-            for (const key of Object.keys(object as Record<string, unknown>)) {
+            const sourceObject = (object && typeof object === 'object') ? object as Record<string, unknown> : {};
+            const sanitized = { ...sourceObject };
+            for (const key of Object.keys(sourceObject)) {
                 if (!declaredKeys.has(key)) {
                     if (!result.errors[key]) result.errors[key] = [];
                     result.errors[key].push(`${key} is not an accepted field`);
