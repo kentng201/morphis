@@ -36,18 +36,14 @@ function resolveServerUrls(options: OpenApiBuildOptions): Array<{ url: string; d
         return [{ url: normalizeServerUrl(envUrl) }];
     }
 
-    const rawHost = process.env.EXPOSE_HOST ?? process.env.HOST;
+    const rawHost = process.env.EXPOSE_HOST ?? process.env.HOST ?? 'localhost';
     const rawPort = process.env.EXPOSE_PORT ?? process.env.PORT;
     const rawPath = process.env.EXPOSE_PATH ?? process.env.BASE_PATH ?? '';
     const protocol = (process.env.EXPOSE_PROTOCOL ?? process.env.PROTOCOL ?? '').toLowerCase();
     const useHttps = protocol === 'https' || process.env.HTTPS === 'true' || process.env.HTTPS === '1';
 
-    if (!rawHost && !rawPort) {
-        return [];
-    }
-
     const basePath = rawPath ? `/${rawPath.replace(/^\/+|\/+$/g, '')}` : '';
-    const host = rawHost && rawHost !== '0.0.0.0' && rawHost !== '::' ? rawHost : 'localhost';
+    const host = rawHost !== '0.0.0.0' && rawHost !== '::' ? rawHost : 'localhost';
 
     if (host.startsWith('http://') || host.startsWith('https://')) {
         return [{ url: normalizeServerUrl(`${host}${basePath}`) }];
