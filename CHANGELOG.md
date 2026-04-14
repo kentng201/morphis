@@ -2,6 +2,15 @@
 
 Generated from git tags, commit history, and code-level diffs in this repository.
 
+## v0.6.1: D1 Support, Cloudflare Deployment, CORS Reliability, and Model Mapping Fixes
+- Added Cloudflare D1 support across migration, connection resolution, database typing, model introspection, and deploy-time binding generation so D1-backed projects can use the full Drizzle-based workflow locally and on Cloudflare.
+- Added Cloudflare D1-specific scaffolding to project creation and connection setup so new D1 projects can capture the remote database name and UUID and write the needed environment variables automatically.
+- Improved CLI migration and deploy flows to resolve the active connection more reliably for D1 and other SQL drivers, including fail-fast deploy-time migration execution that aborts release on migration errors.
+- Preserved the local SQLite fallback path for Bun development while keeping the same D1-oriented connection config compatible with remote Cloudflare Workers.
+- Fixed router and CORS middleware interaction so CORS headers are preserved for preflight, normal, and error responses even when CORS is not the first middleware.
+- Improved model field normalization to map camelCase and snake_case names automatically during query and persistence operations, while returning cleaner camelCase output.
+- Added a regression test covering CORS middleware ordering behavior.
+
 ## v0.6.0: Drizzle ORM and Runtime Infrastructure Release
 - Added centralized framework error primitives and router-level error serialization so controllers, middlewares, and services can throw typed errors with status codes, headers, and custom response bodies.
 - Expanded first-class HTTP errors to cover the full standard 4xx/5xx status-code set, and added helpers to map status codes into default messages and framework error instances.
