@@ -2,6 +2,7 @@ import { HttpMethod, Request, RawRequest, RouteSpec, ValidateMap } from './types
 import { HttpMethodMiddleware, ValidateMiddleware, EndpointMiddleware } from './decorators';
 import { TransformerMiddleware } from '../middlewares/TransformerMiddleware';
 import { ConnectMiddleware } from '../middlewares/ConnectMiddleware';
+import { CorsMiddleware } from '../middlewares/CorsMiddleware';
 import { Middleware } from './Middleware';
 import { current, runWithContext } from './Context';
 import { ROUTE_KEY, VALIDATE_KEY } from './metadata';
@@ -326,8 +327,7 @@ export class Router {
                 );
                 try {
                     const result = await chain(preflightReq);
-                    if (result instanceof Response) return result;
-                    return new Response(null, { status: 204 });
+                    return this.finalizeResponse(preflightReq, result, 204);
                 } catch (err) {
                     return this.serializeError(err, preflightReq);
                 }
@@ -369,8 +369,7 @@ export class Router {
                     );
 
                     const result = await chain(appReq);
-                    if (result instanceof Response) return result;
-                    return Response.json(result, { status: 200 });
+                    return this.finalizeResponse(appReq, result, 200);
                 } catch (err) {
                     return this.serializeError(err, appReq);
                 } finally {
@@ -397,10 +396,32 @@ export class Router {
         });
     }
 
-    private serializeError(error: unknown, request: Request): Promise<Response> {
-        return createErrorResponse(error, {
+    private applyGlobalResponseMiddlewares(request: Request, response: Response): Response {
+        let output = response;
+
+        for (const middleware of this.globalMiddlewares) {
+            if (middleware instanceof CorsMiddleware) {
+                output = middleware.applyToResponse(request, output);
+            }
+        }
+
+        return output;
+    }
+
+    private finalizeResponse(request: Request, result: unknown, defaultStatus: number): Response {
+        const response = result instanceof Response
+            ? result
+            : Response.json(result, { status: defaultStatus });
+
+        return this.applyGlobalResponseMiddlewares(request, response);
+    }
+
+    private async serializeError(error: unknown, request: Request): Promise<Response> {
+        const response = await createErrorResponse(error, {
             request,
             trackId: current.trackId,
         }, this.errorFormatter);
+
+        return this.applyGlobalResponseMiddlewares(request, response);
     }
 }

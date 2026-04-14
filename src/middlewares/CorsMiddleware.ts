@@ -36,10 +36,8 @@ export class CorsMiddleware extends Middleware {
         return list.includes(requestOrigin) ? requestOrigin : '';
     }
 
-    handler(req: Request, next: (req: Request) => Promise<unknown>): Promise<unknown> {
-        const requestOrigin = req.headers.get('origin');
+    private buildCorsHeaders(requestOrigin: string | null): Record<string, string> {
         const allowedOrigin = this.resolveOrigin(requestOrigin);
-
         const corsHeaders: Record<string, string> = {
             'Access-Control-Allow-Methods': this.methods,
             'Access-Control-Allow-Headers': this.headers,
@@ -48,30 +46,40 @@ export class CorsMiddleware extends Middleware {
 
         if (allowedOrigin) {
             corsHeaders['Access-Control-Allow-Origin'] = allowedOrigin;
-            // Required when origin is not '*' so the browser sends credentials
             if (allowedOrigin !== '*') {
                 corsHeaders['Vary'] = 'Origin';
             }
         }
 
+        return corsHeaders;
+    }
+
+    applyToResponse(req: Pick<Request, 'headers'>, response: Response): Response {
+        const corsHeaders = this.buildCorsHeaders(req.headers.get('origin'));
+        const res = new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+        });
+
+        Object.entries(corsHeaders).forEach(([key, value]) => res.headers.set(key, value));
+        return res;
+    }
+
+    async handler(req: Request, next: (req: Request) => Promise<unknown>): Promise<unknown> {
+        const corsHeaders = this.buildCorsHeaders(req.headers.get('origin'));
+
         // Preflight — short-circuit, no need to call next()
         if (req.raw.method === 'OPTIONS') {
-            return Promise.resolve(new Response(null, { status: 204, headers: corsHeaders }));
+            return new Response(null, { status: 204, headers: corsHeaders });
         }
 
-        return next(req).then(result => {
-            if (result instanceof Response) {
-                // Clone the response and inject CORS headers
-                const res = new Response(result.body, {
-                    status: result.status,
-                    statusText: result.statusText,
-                    headers: result.headers,
-                });
-                Object.entries(corsHeaders).forEach(([k, v]) => res.headers.set(k, v));
-                return res;
-            }
-            return result;
-        });
+        const result = await next(req);
+        if (result instanceof Response) {
+            return this.applyToResponse(req, result);
+        }
+
+        return result;
     }
 }
 
