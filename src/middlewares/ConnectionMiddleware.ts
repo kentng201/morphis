@@ -33,6 +33,13 @@ async function ping(entry: ConnectionEntry): Promise<void> {
         case 'sqlite':
             db.$client.query('SELECT 1');
             break;
+        case 'd1':
+            if (typeof db.$client?.prepare === 'function') {
+                await db.$client.prepare('SELECT 1').first();
+            } else {
+                db.$client?.query?.('SELECT 1');
+            }
+            break;
         default:
             break;
     }

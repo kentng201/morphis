@@ -9,6 +9,31 @@ export interface ConnectionEntry {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const registry = new Map<string, ConnectionEntry>();
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getGlobalValue(pathName: string): any {
+    return pathName.split('.').reduce((acc: unknown, key) => {
+        if (acc && typeof acc === 'object' && key in (acc as Record<string, unknown>)) {
+            return (acc as Record<string, unknown>)[key];
+        }
+        return undefined;
+    }, globalThis as unknown);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolveD1Database(conn: any): any {
+    const direct = conn?.database ?? conn?.db ?? conn?.client;
+    if (direct && typeof direct.prepare === 'function') return direct;
+
+    const bindingName = typeof conn?.binding === 'string' && conn.binding.trim() !== ''
+        ? conn.binding.trim()
+        : 'DB';
+
+    const fromGlobal = getGlobalValue(bindingName) ?? getGlobalValue(`__env.${bindingName}`);
+    if (fromGlobal && typeof fromGlobal.prepare === 'function') return fromGlobal;
+
+    return undefined;
+}
+
 /**
  * Resolve a package from the target (consumer) project's node_modules,
  * then dynamically import it. This ensures morphis never ships its own
@@ -125,6 +150,28 @@ export class ConnectionManager {
                 return { db: drizzle(database), driver };
             }
 
+            case 'd1': {
+                const d1Database = resolveD1Database(conn);
+                if (d1Database) {
+                    const drizzleMod = await importFromProject('drizzle-orm/d1');
+                    const drizzle = drizzleMod.drizzle;
+                    return { db: drizzle(d1Database), driver };
+                }
+
+                if (conn.storage) {
+                    const sqliteMod = await importFromProject('bun:sqlite');
+                    const Database = sqliteMod.Database ?? sqliteMod.default;
+                    const database = new Database(conn.storage);
+                    const drizzleMod = await importFromProject('drizzle-orm/bun-sqlite');
+                    const drizzle = drizzleMod.drizzle;
+                    return { db: drizzle(database), driver };
+                }
+
+                throw new Error(
+                    'D1 requires either connection.database, a global binding matching connection.binding, or connection.storage for local Bun development.',
+                );
+            }
+
             case 'mssql': {
                 console.warn(
                     '[ConnectionManager] drizzle-orm/mssql is in preview and may be unstable.',
@@ -175,6 +222,7 @@ export class ConnectionManager {
                         await db.$client?.close?.();
                         break;
                     case 'sqlite':
+                    case 'd1':
                         db.$client?.close?.();
                         break;
                 }

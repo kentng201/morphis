@@ -4,7 +4,7 @@ import path from 'path';
 import { runInProject } from '../utils/spawnInProject';
 
 /** Drivers that use plain-SQL migrations */
-const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite']);
+const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite', 'd1']);
 
 export async function runMigrate(rest: string[]) {
     const cwd = process.cwd();
@@ -44,15 +44,9 @@ export async function runMigrate(rest: string[]) {
 
     // ── Resolve target connection ─────────────────────────────────────────────
     const entries = Object.entries(databases);
-    let config: any;
-
-    if (connectionName === 'default') {
-        const defaultEntry = entries.find(([, v]) => v.isDefault);
-        config = defaultEntry ? defaultEntry[1] : entries[0][1];
-    } else {
-        const match = entries.find(([, v]) => v.name === connectionName);
-        config = match ? match[1] : undefined;
-    }
+    const [resolvedConnectionName, config]: [string, any] = connectionName === 'default'
+        ? (entries.find(([, d]) => d.isDefault) ?? entries[0])
+        : [connectionName, databases[connectionName]];
 
     if (!config) {
         console.error(chalk.red(`\n  Connection "${connectionName}" not found in src/config/database.ts\n`));
@@ -64,13 +58,13 @@ export async function runMigrate(rest: string[]) {
     if (!SQL_DRIVERS.has(driver)) {
         console.error(chalk.red(
             `\n  Driver "${driver}" does not support .sql migrations.\n` +
-            `  Supported: mysql, mariadb, postgres, mssql, sqlite\n`,
+            `  Supported: mysql, mariadb, postgres, mssql, sqlite, d1\n`,
         ));
         process.exit(1);
     }
 
     // ── Verify migrations/<connection>/ folder exists ───────────────────────
-    const connectionFolder = config.name as string;
+    const connectionFolder = resolvedConnectionName;
     const migrationsDir = path.join(cwd, 'migrations', connectionFolder);
     if (!fs.existsSync(migrationsDir)) {
         console.error(chalk.red(`\n  migrations/${connectionFolder}/ folder not found. Run: morphis new:migration <name> --connection=${connectionFolder}\n`));
@@ -80,7 +74,7 @@ export async function runMigrate(rest: string[]) {
     // ── Build the temp migration script for the target project ──────────────
     const connectionJson = JSON.stringify({ ...config.connection });
     const migrationsDirJson = JSON.stringify(migrationsDir);
-    const configName = config.name as string;
+    const configName = resolvedConnectionName;
 
     const tmpScript = buildMigrationScript(driver, connectionJson, migrationsDirJson, configName);
 
@@ -114,6 +108,8 @@ function buildMigrationScript(
             return buildMysqlScript(connectionJson, migrationsDirJson, configName, driver);
         case 'sqlite':
             return buildSqliteScript(connectionJson, migrationsDirJson, configName);
+        case 'd1':
+            return buildD1Script(connectionJson, migrationsDirJson, configName);
         case 'mssql':
             return buildMssqlScript(connectionJson, migrationsDirJson, configName);
         default:
@@ -229,6 +225,58 @@ import path from 'path';
 
 const connOpts = ${connectionJson};
 const db = new Database(connOpts.storage || ':memory:');
+
+db.run(\`
+    CREATE TABLE IF NOT EXISTS migrations (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch     INTEGER NOT NULL,
+        name      TEXT NOT NULL,
+        timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+\`);
+
+const ran = db.prepare('SELECT name FROM migrations').all() as { name: string }[];
+const ranNames = new Set(ran.map(r => r.name));
+
+const batchRow = db.prepare('SELECT COALESCE(MAX(batch), 0) AS maxbatch FROM migrations').get() as any;
+const nextBatch = Number(batchRow.maxbatch) + 1;
+
+const migrationsDir = ${migrationsDirJson};
+const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
+const pending = files.filter(f => !ranNames.has(f));
+
+if (pending.length === 0) {
+    console.log('  Nothing to migrate — all migrations are up to date.');
+} else {
+    for (const file of pending) {
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
+        if (sql) db.run(sql);
+        db.prepare('INSERT INTO migrations (batch, name, timestamp) VALUES (?, ?, ?)').run(
+            nextBatch, file, new Date().toISOString()
+        );
+        console.log('  migrate  ' + file);
+    }
+    console.log('  Batch ' + nextBatch + ' complete — ' + pending.length + ' migration(s) ran.');
+}
+
+db.close();
+`;
+}
+
+function buildD1Script(connectionJson: string, migrationsDirJson: string, configName: string): string {
+    return `
+import { Database } from 'bun:sqlite';
+import fs from 'fs';
+import path from 'path';
+
+const connOpts = ${connectionJson};
+if (!connOpts.storage) {
+    console.error('Cannot run D1 migrations for ${configName}: connection.storage is missing.');
+    console.error('Set a local SQLite path in src/config/database.ts for local Bun migration support.');
+    process.exit(1);
+}
+
+const db = new Database(connOpts.storage);
 
 db.run(\`
     CREATE TABLE IF NOT EXISTS migrations (

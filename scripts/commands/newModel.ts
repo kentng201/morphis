@@ -4,7 +4,7 @@ import path from 'path';
 import { runInProject } from '../utils/spawnInProject';
 
 /** Drivers that support table introspection */
-const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite']);
+const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite', 'd1']);
 
 /** Convert PascalCase / camelCase → snake_case */
 function toSnakeCase(str: string): string {
@@ -260,6 +260,7 @@ await conn.end();
 `;
 
         case 'sqlite':
+        case 'd1':
             return `
 import { Database } from 'bun:sqlite';
 import fs from 'fs';

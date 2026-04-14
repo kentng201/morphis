@@ -8,7 +8,7 @@ import { selectOption } from '../utils/prompt';
 // Database option registry (exported for use by new:connection)
 // ---------------------------------------------------------------------------
 
-export type DbDriver = 'mariadb' | 'mysql' | 'mssql' | 'postgres' | 'sqlite';
+export type DbDriver = 'd1' | 'mariadb' | 'mysql' | 'mssql' | 'postgres' | 'sqlite';
 
 export interface DbOption {
     label: string;
@@ -17,6 +17,7 @@ export interface DbOption {
 }
 
 export const DB_OPTIONS: DbOption[] = [
+    { label: 'Cloudflare D1', driver: 'd1', deps: ['drizzle-orm'] },
     { label: 'MariaDB', driver: 'mariadb', deps: ['drizzle-orm', 'mysql2'] },
     { label: 'MySQL', driver: 'mysql', deps: ['drizzle-orm', 'mysql2'] },
     { label: 'Microsoft SQL', driver: 'mssql', deps: ['drizzle-orm', 'mssql'] },
@@ -32,6 +33,11 @@ export const NO_DB_LABEL = 'No database needed';
 
 function buildConnectionFields(driver: DbDriver): string {
     switch (driver) {
+        case 'd1':
+            return [
+                `            binding: process.env.D1_BINDING || 'DB',`,
+                `            storage: process.env.DB_STORAGE || './database.sqlite',`,
+            ].join('\n');
         case 'mariadb':
         case 'mysql':
             return [
@@ -92,6 +98,7 @@ interface DrizzleTypeEntry {
 
 /** Registry keyed by importPath so mysql + mariadb share one import. */
 const DRIZZLE_IMPORT_MAP = new Map<string, DrizzleTypeEntry>([
+    ['drizzle-orm/d1',            { importPath: 'drizzle-orm/d1',            typeName: 'DrizzleD1Database', driverLiterals: `'d1'` }],
     ['drizzle-orm/node-postgres', { importPath: 'drizzle-orm/node-postgres', typeName: 'NodePgDatabase', driverLiterals: `'postgres'` }],
     ['drizzle-orm/mysql2',        { importPath: 'drizzle-orm/mysql2',        typeName: 'MySql2Database',  driverLiterals: `'mysql' | 'mariadb'` }],
     ['drizzle-orm/bun-sqlite',    { importPath: 'drizzle-orm/bun-sqlite',    typeName: 'BunSQLiteDatabase', driverLiterals: `'sqlite'` }],
@@ -99,6 +106,7 @@ const DRIZZLE_IMPORT_MAP = new Map<string, DrizzleTypeEntry>([
 ]);
 
 const DRIVER_TO_IMPORT_PATH: Partial<Record<DbDriver, string>> = {
+    d1:       'drizzle-orm/d1',
     postgres: 'drizzle-orm/node-postgres',
     mysql:    'drizzle-orm/mysql2',
     mariadb:  'drizzle-orm/mysql2',

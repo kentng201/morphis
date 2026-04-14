@@ -34,12 +34,20 @@ export interface SqliteConnection {
     storage: string;
 }
 
+export interface D1Connection {
+    binding?: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    database?: any;
+    storage?: string;
+}
+
 export type DatabaseConfig =
     | { isDefault?: boolean; driver: 'mariadb'; connection: MariadbConnection }
     | { isDefault?: boolean; driver: 'mysql'; connection: MysqlConnection }
     | { isDefault?: boolean; driver: 'mssql'; connection: MssqlConnection }
     | { isDefault?: boolean; driver: 'postgres'; connection: PostgresConnection }
-    | { isDefault?: boolean; driver: 'sqlite'; connection: SqliteConnection };
+    | { isDefault?: boolean; driver: 'sqlite'; connection: SqliteConnection }
+    | { isDefault?: boolean; driver: 'd1'; connection: D1Connection };
 
 /**
  * Define a database configuration map with literal key inference, preventing

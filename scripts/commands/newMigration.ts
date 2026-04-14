@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 /** Drivers that use plain-SQL migrations. */
-const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite']);
+const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite', 'd1']);
 
 /** Formats a Date as YYYYMMDDHHmmss */
 function formatTimestamp(d: Date): string {
@@ -40,7 +40,7 @@ export async function runNewMigration(rest: string[]) {
     }
 
     // ── Load database config ──────────────────────────────────────────────────
-    let databases: any[];
+    let databases: Record<string, any>;
     try {
         const mod = await import(configPath);
         databases = mod.default;
@@ -51,15 +51,16 @@ export async function runNewMigration(rest: string[]) {
         process.exit(1);
     }
 
-    if (!Array.isArray(databases) || databases.length === 0) {
+    const entries = Object.entries(databases ?? {});
+    if (entries.length === 0) {
         console.error(chalk.red('\n  src/config/database.ts has no connections configured\n'));
         process.exit(1);
     }
 
     // ── Resolve target connection ─────────────────────────────────────────────
-    const config: any = connectionName === 'default'
-        ? (databases.find((d: any) => d.isDefault) ?? databases[0])
-        : databases.find((d: any) => d.name === connectionName);
+    const [resolvedConnectionName, config]: [string, any] = connectionName === 'default'
+        ? (entries.find(([, d]) => d.isDefault) ?? entries[0])
+        : [connectionName, databases[connectionName]];
 
     if (!config) {
         console.error(chalk.red(`\n  Connection "${connectionName}" not found in src/config/database.ts\n`));
@@ -71,13 +72,13 @@ export async function runNewMigration(rest: string[]) {
     if (!SQL_DRIVERS.has(driver)) {
         console.error(chalk.red(
             `\n  Driver "${driver}" does not support .sql migrations.\n` +
-            '  Supported: mysql, mariadb, postgres, mssql\n',
+            '  Supported: mysql, mariadb, postgres, mssql, sqlite, d1\n',
         ));
         process.exit(1);
     }
 
     // ── Create migrations/<connection>/ and the empty .sql file ───────────────
-    const connectionFolder = config.name as string;
+    const connectionFolder = resolvedConnectionName;
     const migrationsDir = path.join(cwd, 'migrations', connectionFolder);
     fs.mkdirSync(migrationsDir, { recursive: true });
 

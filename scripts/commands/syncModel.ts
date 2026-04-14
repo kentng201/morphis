@@ -4,7 +4,7 @@ import path from 'path';
 import { runInProject } from '../utils/spawnInProject';
 
 /** Drivers that support table introspection */
-const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite']);
+const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite', 'd1']);
 
 /** Convert PascalCase / camelCase → snake_case */
 function toSnakeCase(str: string): string {
@@ -99,7 +99,8 @@ function drizzleCoreModule(driver: string): string {
         case 'postgres': return 'drizzle-orm/pg-core';
         case 'mysql':
         case 'mariadb': return 'drizzle-orm/mysql-core';
-        case 'sqlite': return 'drizzle-orm/sqlite-core';
+        case 'sqlite':
+        case 'd1': return 'drizzle-orm/sqlite-core';
         case 'mssql': return 'drizzle-orm/mssql-core';
         default: return 'drizzle-orm/pg-core';
     }
@@ -111,7 +112,8 @@ function tableBuilderName(driver: string): string {
         case 'postgres': return 'pgTable';
         case 'mysql':
         case 'mariadb': return 'mysqlTable';
-        case 'sqlite': return 'sqliteTable';
+        case 'sqlite':
+        case 'd1': return 'sqliteTable';
         case 'mssql': return 'mssqlTable';
         default: return 'pgTable';
     }
@@ -199,7 +201,7 @@ export async function runSyncModel(rest: string[]) {
     if (!SQL_DRIVERS.has(driver)) {
         console.error(chalk.red(
             `\n  Driver "${driver}" does not support table introspection.\n` +
-            '  Supported: mysql, mariadb, postgres, mssql, sqlite\n',
+            '  Supported: mysql, mariadb, postgres, mssql, sqlite, d1\n',
         ));
         process.exit(1);
     }
@@ -292,12 +294,12 @@ try {
 }
 await connection.end();
 `;
-    } else if (driver === 'sqlite') {
+    } else if (driver === 'sqlite' || driver === 'd1') {
         introspectScript = `
 import { Database } from 'bun:sqlite';
 import fs from 'fs';
 
-const db = new Database(${JSON.stringify(config.connection.storage)});
+const db = new Database(${JSON.stringify(config.connection.storage ?? './database.sqlite')});
 try {
     const rows = db.query('PRAGMA table_info(${tableName})').all();
     const cols = rows.map(r => ({

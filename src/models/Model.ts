@@ -100,6 +100,27 @@ function introspectSqlite(db: any, tableName: string): ColumnMeta[] {
     }));
 }
 
+function quoteSqliteIdentifier(name: string): string {
+    return `"${name.replace(/"/g, '""')}"`;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function introspectD1(db: any, tableName: string): Promise<ColumnMeta[]> {
+    if (typeof db.$client?.prepare === 'function') {
+        const result = await db.$client.prepare(`PRAGMA table_info(${quoteSqliteIdentifier(tableName)})`).all();
+        const rows = Array.isArray(result) ? result : (result?.results ?? []);
+        return rows.map((r: Record<string, any>) => ({
+            name: String(r.name),
+            type: String(r.type ?? 'TEXT'),
+            nullable: Number(r.notnull ?? 0) === 0,
+            primaryKey: Number(r.pk ?? 0) === 1,
+            defaultValue: (r.dflt_value as string | null | undefined) ?? null,
+        }));
+    }
+
+    return introspectSqlite(db, tableName);
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function introspectMssql(db: any, tableName: string): Promise<ColumnMeta[]> {
     const result = await db.$client.query(
@@ -146,6 +167,7 @@ async function buildDrizzleTable(driver: string, tableName: string, columns: Col
             tableBuilder = 'mysqlTable';
             break;
         case 'sqlite':
+        case 'd1':
             coreMod = await importFromProject('drizzle-orm/sqlite-core');
             tableBuilder = 'sqliteTable';
             break;
@@ -665,6 +687,9 @@ export class Model {
                     break;
                 case 'sqlite':
                     columns = introspectSqlite(entry.db, tableName);
+                    break;
+                case 'd1':
+                    columns = await introspectD1(entry.db, tableName);
                     break;
                 case 'mssql':
                     columns = await introspectMssql(entry.db, tableName);
