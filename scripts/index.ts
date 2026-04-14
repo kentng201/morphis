@@ -321,7 +321,7 @@ const commands: Record<string, CommandDef> = {
     // ── Serverless deploy ────────────────────────────────────────────────────
     'deploy': {
         description: 'Deploy a server to AWS Lambda, Google Cloud Run, or Cloudflare Containers',
-        usage: 'morphis deploy --server=<name> [--env=<name>] --target=aws|gcloud|cloudflare [--version=<tag>] [--region=<region>] [--gcp-project=<id>] [--function=<name>] [--service=<name>] [--worker=<name>] [--max-instances=<n>] [--port=<n>] [--sleep-after=<duration>] [--no-build] [--no-docker-build]',
+        usage: 'morphis deploy --server=<name> [--env=<name>] --target=aws|gcloud|cloudflare [--connection=<name>] [--version=<tag>] [--region=<region>] [--gcp-project=<id>] [--function=<name>] [--service=<name>] [--worker=<name>] [--d1-binding=<name>] [--d1-name=<name>] [--d1-id=<uuid>] [--max-instances=<n>] [--port=<n>] [--sleep-after=<duration>] [--no-build] [--no-docker-build] [--no-migrate]',
         async run() {
             await runDeploy(rest);
         },
@@ -431,6 +431,7 @@ function printHelp() {
     console.log(chalk.gray('    morphis deploy          --server=api --env=dev --target=aws --version=1.0.0 --region=ap-southeast-1'));
     console.log(chalk.gray('    morphis deploy          --server=api --target=gcloud --version=1.0.0 --gcp-project=my-project'));
     console.log(chalk.gray('    morphis deploy          --server=api --target=cloudflare --version=1.0.0'));
+    console.log(chalk.gray('    morphis deploy          --server=api --env=dev --target=cloudflare --connection=default --d1-name=my-db --d1-id=<uuid>'));
     console.log();
 }
 

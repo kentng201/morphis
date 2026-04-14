@@ -2,7 +2,14 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import { selectOption, inputText } from '../utils/prompt';
-import { DB_OPTIONS, buildConnectionEntry, buildDatabaseFile, buildDbContextDts, parseDriversFromDatabaseFile } from './new';
+import {
+    DB_OPTIONS,
+    buildConnectionEntry,
+    buildDatabaseFile,
+    buildDbContextDts,
+    ensureD1EnvVars,
+    parseDriversFromDatabaseFile,
+} from './new';
 
 export async function runNewConnection(_rest: string[]) {
     const cwd = process.cwd();
@@ -27,6 +34,13 @@ export async function runNewConnection(_rest: string[]) {
         DB_OPTIONS.map(o => o.label),
     );
     const dbOption = DB_OPTIONS.find(o => o.label === dbLabel)!;
+
+    let d1DatabaseName = '';
+    let d1DatabaseId = '';
+    if (dbOption.driver === 'd1') {
+        d1DatabaseName = (await inputText('Cloudflare D1 database name (optional):')).trim();
+        d1DatabaseId = (await inputText('Cloudflare D1 database ID / UUID (optional):')).trim();
+    }
 
     // ── Determine isDefault & file path ──────────────────────────────────────
     const configDir = path.join(cwd, 'src', 'config');
@@ -93,6 +107,25 @@ export async function runNewConnection(_rest: string[]) {
     } else {
         fs.writeFileSync(contextDtsPath, dbContextDts);
         console.log(chalk.gray('    update src/types/Context.d.ts'));
+    }
+
+    if (dbOption.driver === 'd1') {
+        const envFiles = fs.readdirSync(cwd).filter(name => name.startsWith('.env.'));
+        const targetEnvFiles = envFiles.length > 0 ? envFiles : ['.env.api'];
+
+        for (const envFile of targetEnvFiles) {
+            const envPath = path.join(cwd, envFile);
+            const existing = fs.existsSync(envPath)
+                ? fs.readFileSync(envPath, 'utf8')
+                : '';
+            const updatedEnv = ensureD1EnvVars(existing, {
+                d1Binding: 'DB',
+                d1DatabaseName,
+                d1DatabaseId,
+            });
+            fs.writeFileSync(envPath, updatedEnv);
+            console.log(chalk.gray(`    update ${envFile}`));
+        }
     }
 
     console.log();

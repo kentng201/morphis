@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, execSync } from 'child_process';
 import { runDockerBuild, generateDockerfile } from './dockerBuild';
+import { runMigrate } from './migrate';
 import { resolveEnvTarget } from '../utils/env';
 
 // ---------------------------------------------------------------------------
@@ -202,6 +203,214 @@ function tryExec(cmd: string, opts?: { throws?: boolean }): string {
         }
         return '';
     }
+}
+
+function readEnvFileValues(filePath: string): Record<string, string> {
+    if (!fs.existsSync(filePath)) return {};
+
+    const out: Record<string, string> = {};
+    const content = fs.readFileSync(filePath, 'utf8');
+
+    for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+
+        const eq = line.indexOf('=');
+        if (eq === -1) continue;
+
+        const key = line.slice(0, eq).trim();
+        let value = line.slice(eq + 1).trim();
+        if (
+            (value.startsWith('"') && value.endsWith('"')) ||
+            (value.startsWith("'") && value.endsWith("'"))
+        ) {
+            value = value.slice(1, -1);
+        }
+        out[key] = value;
+    }
+
+    return out;
+}
+
+function loadEnvFileIntoProcess(filePath: string): Record<string, string> {
+    const values = readEnvFileValues(filePath);
+    for (const [key, value] of Object.entries(values)) {
+        process.env[key] = value;
+    }
+    return values;
+}
+
+function shellQuote(value: string): string {
+    return /^[A-Za-z0-9_./:=+-]+$/.test(value) ? value : JSON.stringify(value);
+}
+
+function buildShellCommand(cmd: string, args: string[]): string {
+    return [cmd, ...args].map(shellQuote).join(' ');
+}
+
+function extractJsonRows(output: string): Array<Record<string, unknown>> {
+    try {
+        const parsed = JSON.parse(output) as unknown;
+        const rows: Array<Record<string, unknown>> = [];
+
+        const visit = (value: unknown) => {
+            if (Array.isArray(value)) {
+                if (value.every(item => item && typeof item === 'object' && !Array.isArray(item))) {
+                    rows.push(...value as Array<Record<string, unknown>>);
+                }
+                for (const item of value) visit(item);
+                return;
+            }
+            if (value && typeof value === 'object') {
+                for (const inner of Object.values(value as Record<string, unknown>)) visit(inner);
+            }
+        };
+
+        visit(parsed);
+        return rows;
+    } catch {
+        return [];
+    }
+}
+
+async function resolveConnectionConfig(cwd: string, requestedName: string): Promise<{ connectionName: string; config: any }> {
+    const configPath = path.join(cwd, 'src', 'config', 'database.ts');
+    if (!fs.existsSync(configPath)) {
+        throw new Error('src/config/database.ts not found. Run: morphis new:connection');
+    }
+
+    const mod = await import(configPath);
+    const databases = mod.default as Record<string, any>;
+    const entries = Object.entries(databases ?? {});
+    if (entries.length === 0) {
+        throw new Error('src/config/database.ts has no connections configured');
+    }
+
+    if (requestedName === 'default') {
+        const [connectionName, config] = entries.find(([, d]) => d?.isDefault) ?? entries[0];
+        return { connectionName, config };
+    }
+
+    const config = databases?.[requestedName];
+    if (!config) {
+        throw new Error(`Connection "${requestedName}" not found in src/config/database.ts`);
+    }
+    return { connectionName: requestedName, config };
+}
+
+async function runCloudflareRemoteD1Migrations(opts: {
+    cwd: string;
+    migrationsDir: string;
+    connectionName: string;
+    databaseName: string;
+    envFileArgs: string[];
+}) {
+    const { cwd, migrationsDir, connectionName, databaseName, envFileArgs } = opts;
+    const [wranglerCmd, wranglerPrefix] = resolveWrangler();
+    const baseArgs = [...wranglerPrefix, 'd1', 'execute', databaseName, '--remote'];
+
+    const runQuery = (sql: string): string => tryExec(
+        buildShellCommand(wranglerCmd, [...baseArgs, '--json', '--command', sql, ...envFileArgs]),
+        { throws: true },
+    );
+
+    console.log(chalk.cyan(`\n  [deploy:migrate] Running remote D1 migrations for "${connectionName}" on "${databaseName}" ...\n`));
+
+    runQuery(
+        `CREATE TABLE IF NOT EXISTS migrations (` +
+        `id INTEGER PRIMARY KEY AUTOINCREMENT, ` +
+        `batch INTEGER NOT NULL, ` +
+        `name TEXT NOT NULL UNIQUE, ` +
+        `timestamp TEXT NOT NULL DEFAULT (datetime('now'))` +
+        `)`,
+    );
+
+    const batchRows = extractJsonRows(runQuery('SELECT COALESCE(MAX(batch), 0) AS maxbatch FROM migrations'));
+    const nextBatch = Number(batchRows.find(row => 'maxbatch' in row)?.maxbatch ?? 0) + 1;
+
+    const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
+    let ranCount = 0;
+
+    for (const file of files) {
+        const escapedFile = file.replace(/'/g, "''");
+        const existing = extractJsonRows(runQuery(`SELECT name FROM migrations WHERE name = '${escapedFile}' LIMIT 1`));
+        if (existing.length > 0) {
+            console.log(chalk.gray(`  skip     ${file}`));
+            continue;
+        }
+
+        console.log(chalk.gray(`  migrate  ${file}`));
+        await spawnCmd(wranglerCmd, [...baseArgs, '--file', path.join(migrationsDir, file), ...envFileArgs], cwd);
+        runQuery(
+            `INSERT INTO migrations (batch, name, timestamp) VALUES (` +
+            `${nextBatch}, '${escapedFile}', '${new Date().toISOString().replace(/'/g, "''")}')`,
+        );
+        ranCount += 1;
+    }
+
+    if (ranCount === 0) {
+        console.log(chalk.gray('  Nothing to migrate — all migrations are up to date.'));
+    } else {
+        console.log(chalk.green(`  Batch ${nextBatch} complete — ${ranCount} migration(s) ran.`));
+    }
+    console.log();
+}
+
+async function runMigrationsBeforeDeploy(opts: {
+    cwd: string;
+    envFile: string;
+    target: string;
+    requestedConnection: string;
+    d1DatabaseName?: string;
+    d1DatabaseId?: string;
+}) {
+    const { cwd, envFile, target, requestedConnection, d1DatabaseName, d1DatabaseId } = opts;
+    const envFilePath = path.join(cwd, envFile);
+    const envValues = loadEnvFileIntoProcess(envFilePath);
+
+    const { connectionName, config } = await resolveConnectionConfig(cwd, requestedConnection);
+    const migrationsDir = path.join(cwd, 'migrations', connectionName);
+    if (!fs.existsSync(migrationsDir)) {
+        console.log(chalk.gray(`\n  [deploy:migrate] No migrations/${connectionName}/ folder found — skipping migrations.\n`));
+        return;
+    }
+
+    console.log(chalk.yellow('\n  [deploy:migrate] Running migrations before deployment.'));
+    console.log(chalk.yellow('  Warning: there is no automatic rollback if a migration partially succeeds.'));
+    console.log(chalk.gray('  Any migration error will abort the deployment process.\n'));
+
+    if (target === 'cloudflare' && config?.driver === 'd1') {
+        const resolvedDatabaseName = d1DatabaseName
+            ?? envValues.CLOUDFLARE_D1_DATABASE_NAME
+            ?? envValues.D1_DATABASE_NAME
+            ?? process.env.CLOUDFLARE_D1_DATABASE_NAME
+            ?? process.env.D1_DATABASE_NAME
+            ?? '';
+        const resolvedDatabaseId = d1DatabaseId
+            ?? envValues.CLOUDFLARE_D1_DATABASE_ID
+            ?? envValues.D1_DATABASE_ID
+            ?? process.env.CLOUDFLARE_D1_DATABASE_ID
+            ?? process.env.D1_DATABASE_ID
+            ?? '';
+
+        if (!resolvedDatabaseName || !resolvedDatabaseId) {
+            throw new Error(
+                'Cloudflare D1 migration requires CLOUDFLARE_D1_DATABASE_NAME and CLOUDFLARE_D1_DATABASE_ID, or pass --d1-name and --d1-id.',
+            );
+        }
+
+        const envFileArgs = fs.existsSync(envFilePath) ? ['--env-file', envFile] : [];
+        await runCloudflareRemoteD1Migrations({
+            cwd,
+            migrationsDir,
+            connectionName,
+            databaseName: resolvedDatabaseName,
+            envFileArgs,
+        });
+        return;
+    }
+
+    await runMigrate([`--connection=${connectionName}`]);
 }
 
 /**
@@ -407,8 +616,24 @@ async function deployCloudflare(opts: {
     port: number;
     sleepAfter: string;
     noBuild: boolean;
+    d1Binding?: string;
+    d1DatabaseName?: string;
+    d1DatabaseId?: string;
 }) {
-    const { cwd, envFile, server, version, workerName, maxInstances, port, sleepAfter, noBuild } = opts;
+    const {
+        cwd,
+        envFile,
+        server,
+        version,
+        workerName,
+        maxInstances,
+        port,
+        sleepAfter,
+        noBuild,
+        d1Binding,
+        d1DatabaseName,
+        d1DatabaseId,
+    } = opts;
 
     const className = `${toPascalCase(server)}Container`;
     const bindingName = `${server.toUpperCase().replace(/-/g, '_')}_CONTAINER`;
@@ -510,6 +735,39 @@ async function deployCloudflare(opts: {
         // Step 2: Write a Dockerfile that packages the Bun bundle
         fs.writeFileSync(path.join(cwd, dockerfileName), generateDockerfile(server, { envFile, port }), 'utf8');
 
+        const envFilePath = path.join(cwd, envFile);
+        const envValues = readEnvFileValues(envFilePath);
+        const databaseConfigPath = path.join(cwd, 'src', 'config', 'database.ts');
+        const databaseConfigSource = fs.existsSync(databaseConfigPath)
+            ? fs.readFileSync(databaseConfigPath, 'utf8')
+            : '';
+        const usesD1 = /driver\s*:\s*['"]d1['"]/.test(databaseConfigSource);
+
+        const resolvedD1Binding = d1Binding
+            ?? envValues.CLOUDFLARE_D1_BINDING
+            ?? envValues.D1_BINDING
+            ?? process.env.CLOUDFLARE_D1_BINDING
+            ?? process.env.D1_BINDING
+            ?? 'DB';
+        const resolvedD1DatabaseName = d1DatabaseName
+            ?? envValues.CLOUDFLARE_D1_DATABASE_NAME
+            ?? envValues.D1_DATABASE_NAME
+            ?? process.env.CLOUDFLARE_D1_DATABASE_NAME
+            ?? process.env.D1_DATABASE_NAME
+            ?? '';
+        const resolvedD1DatabaseId = d1DatabaseId
+            ?? envValues.CLOUDFLARE_D1_DATABASE_ID
+            ?? envValues.D1_DATABASE_ID
+            ?? process.env.CLOUDFLARE_D1_DATABASE_ID
+            ?? process.env.D1_DATABASE_ID
+            ?? '';
+
+        if (usesD1 && (!resolvedD1DatabaseName || !resolvedD1DatabaseId)) {
+            console.log(chalk.yellow(`\n  [deploy:cloudflare] D1 driver detected in src/config/database.ts, but no remote D1 database mapping was provided.`));
+            console.log(chalk.gray('  Set CLOUDFLARE_D1_DATABASE_NAME and CLOUDFLARE_D1_DATABASE_ID in your env file, or pass --d1-name and --d1-id.'));
+            console.log(chalk.gray('  Local fallback via DB_STORAGE will still work for Bun development.\n'));
+        }
+
         // Step 3: Write a Worker entry that routes all requests into the container.
         //   Uses @cloudflare/containers which wraps Durable Objects boilerplate.
         fs.writeFileSync(
@@ -538,27 +796,38 @@ async function deployCloudflare(opts: {
         );
 
         // Step 4: Write a dedicated wrangler config; avoids touching the user's own wrangler.toml
+        const wranglerConfigLines = [
+            `name = "${workerName}"`,
+            `main = "${workerEntryName}"`,
+            `compatibility_date = "${date}"`,
+            ``,
+            `[[containers]]`,
+            `class_name = "${className}"`,
+            `image = "${dockerfileName}"`,
+            `max_instances = ${maxInstances}`,
+            ``,
+            `[[durable_objects.bindings]]`,
+            `name = "${bindingName}"`,
+            `class_name = "${className}"`,
+            ``,
+            ...(usesD1 && resolvedD1DatabaseName && resolvedD1DatabaseId
+                ? [
+                    `[[d1_databases]]`,
+                    `binding = "${resolvedD1Binding}"`,
+                    `database_name = "${resolvedD1DatabaseName}"`,
+                    `database_id = "${resolvedD1DatabaseId}"`,
+                    ``,
+                ]
+                : []),
+            `[[migrations]]`,
+            `tag = "v1"`,
+            `new_sqlite_classes = ["${className}"]`,
+            ``,
+        ];
+
         fs.writeFileSync(
             path.join(cwd, wranglerConfigName),
-            [
-                `name = "${workerName}"`,
-                `main = "${workerEntryName}"`,
-                `compatibility_date = "${date}"`,
-                ``,
-                `[[containers]]`,
-                `class_name = "${className}"`,
-                `image = "${dockerfileName}"`,
-                `max_instances = ${maxInstances}`,
-                ``,
-                `[[durable_objects.bindings]]`,
-                `name = "${bindingName}"`,
-                `class_name = "${className}"`,
-                ``,
-                `[[migrations]]`,
-                `tag = "v1"`,
-                `new_sqlite_classes = ["${className}"]`,
-                ``,
-            ].join('\n'),
+            wranglerConfigLines.join('\n'),
             'utf8',
         );
 
@@ -580,7 +849,6 @@ async function deployCloudflare(opts: {
         }
 
         // Pass the selected env file to Wrangler so its variables are available.
-        const envFilePath = path.join(cwd, envFile);
         const envFileArgs = fs.existsSync(envFilePath) ? ['--env-file', envFile] : [];
 
         await new Promise<void>((resolve) => {
@@ -636,11 +904,16 @@ export async function runDeploy(args: string[]) {
     const roleArg = args.find(a => a.startsWith('--role='));
     const serviceArg = args.find(a => a.startsWith('--service='));
     const workerArg = args.find(a => a.startsWith('--worker='));
+    const connectionArg = args.find(a => a.startsWith('--connection='));
+    const d1BindingArg = args.find(a => a.startsWith('--d1-binding='));
+    const d1NameArg = args.find(a => a.startsWith('--d1-name='));
+    const d1IdArg = args.find(a => a.startsWith('--d1-id='));
     const maxInstancesArg = args.find(a => a.startsWith('--max-instances='));
     const portArg = args.find(a => a.startsWith('--port='));
     const sleepAfterArg = args.find(a => a.startsWith('--sleep-after='));
     const noBuild = args.includes('--no-build');
     const noBuildDocker = args.includes('--no-docker-build');
+    const noMigrate = args.includes('--no-migrate');
     const target = targetArg?.split('=')[1];
     let version = versionArg?.split('=')[1] ?? 'latest';
     const cwd = process.cwd();
@@ -664,6 +937,26 @@ export async function runDeploy(args: string[]) {
     }
 
     const imageName = getImageName(cwd, server, envName);
+    const requestedConnection = connectionArg?.split('=')[1] ?? 'default';
+    const requestedD1Name = d1NameArg?.split('=')[1];
+    const requestedD1Id = d1IdArg?.split('=')[1];
+
+    if (!noMigrate) {
+        try {
+            await runMigrationsBeforeDeploy({
+                cwd,
+                envFile,
+                target,
+                requestedConnection,
+                d1DatabaseName: requestedD1Name,
+                d1DatabaseId: requestedD1Id,
+            });
+        } catch (err) {
+            console.error(chalk.red('\n  [deploy:migrate] Migration failed. Deployment aborted.'));
+            console.error(chalk.gray(`  ${err instanceof Error ? err.message : String(err)}\n`));
+            process.exit(1);
+        }
+    }
 
     // For aws without an explicit --version, auto-resolve from package.json + ECR tags
     if (target === 'aws' && !versionArg) {
@@ -703,7 +996,23 @@ export async function runDeploy(args: string[]) {
         const maxInstances = Number(maxInstancesArg?.split('=')[1] ?? '3');
         const port = Number(portArg?.split('=')[1] ?? '8080');
         const sleepAfter = sleepAfterArg?.split('=')[1] ?? '2m';
-        await deployCloudflare({ cwd, envFile, server, version, workerName, maxInstances, port, sleepAfter, noBuild });
+        const d1Binding = d1BindingArg?.split('=')[1];
+        const d1DatabaseName = requestedD1Name;
+        const d1DatabaseId = requestedD1Id;
+        await deployCloudflare({
+            cwd,
+            envFile,
+            server,
+            version,
+            workerName,
+            maxInstances,
+            port,
+            sleepAfter,
+            noBuild,
+            d1Binding,
+            d1DatabaseName,
+            d1DatabaseId,
+        });
         return;
     }
 

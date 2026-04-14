@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
-import { selectOption } from '../utils/prompt';
+import { selectOption, inputText } from '../utils/prompt';
 
 // ---------------------------------------------------------------------------
 // Database option registry (exported for use by new:connection)
@@ -35,7 +35,7 @@ function buildConnectionFields(driver: DbDriver): string {
     switch (driver) {
         case 'd1':
             return [
-                `            binding: process.env.D1_BINDING || 'DB',`,
+                `            binding: process.env.CLOUDFLARE_D1_BINDING || process.env.D1_BINDING || 'DB',`,
                 `            storage: process.env.DB_STORAGE || './database.sqlite',`,
             ].join('\n');
         case 'mariadb':
@@ -66,6 +66,47 @@ function buildConnectionFields(driver: DbDriver): string {
         case 'sqlite':
             return `            storage: process.env.DB_STORAGE || './database.sqlite',`;
     }
+}
+
+export function buildEnvFileContent(
+    server: string,
+    driver?: DbDriver | null,
+    opts?: { d1Binding?: string; d1DatabaseName?: string; d1DatabaseId?: string },
+): string {
+    const lines = [
+        `NAME=${server}`,
+        `PORT=3000`,
+        `MULTI_THREAD=true`,
+    ];
+
+    if (driver === 'd1') {
+        lines.push(
+            `D1_BINDING=${opts?.d1Binding || 'DB'}`,
+            `CLOUDFLARE_D1_BINDING=${opts?.d1Binding || 'DB'}`,
+            `CLOUDFLARE_D1_DATABASE_NAME=${opts?.d1DatabaseName || 'your-cloudflare-d1-name'}`,
+            `CLOUDFLARE_D1_DATABASE_ID=${opts?.d1DatabaseId || 'your-cloudflare-d1-uuid'}`,
+            `DB_STORAGE=./database.sqlite`,
+        );
+    }
+
+    return lines.join('\n') + '\n';
+}
+
+export function ensureD1EnvVars(
+    content: string,
+    opts?: { d1Binding?: string; d1DatabaseName?: string; d1DatabaseId?: string },
+): string {
+    const normalized = content.endsWith('\n') ? content : `${content}\n`;
+    const additions = [
+        ['D1_BINDING', opts?.d1Binding || 'DB'],
+        ['CLOUDFLARE_D1_BINDING', opts?.d1Binding || 'DB'],
+        ['CLOUDFLARE_D1_DATABASE_NAME', opts?.d1DatabaseName || 'your-cloudflare-d1-name'],
+        ['CLOUDFLARE_D1_DATABASE_ID', opts?.d1DatabaseId || 'your-cloudflare-d1-uuid'],
+        ['DB_STORAGE', './database.sqlite'],
+    ].filter(([key]) => !new RegExp(`^${key}=`, 'm').test(normalized));
+
+    if (additions.length === 0) return normalized;
+    return `${normalized}${additions.map(([key, value]) => `${key}=${value}`).join('\n')}\n`;
 }
 
 /**
@@ -237,6 +278,13 @@ export async function runNew(rest: string[]) {
     );
     const dbOption = DB_OPTIONS.find(o => o.label === dbLabel) ?? null;
 
+    let d1DatabaseName = '';
+    let d1DatabaseId = '';
+    if (dbOption?.driver === 'd1') {
+        d1DatabaseName = (await inputText('Cloudflare D1 database name (optional):')).trim();
+        d1DatabaseId = (await inputText('Cloudflare D1 database ID / UUID (optional):')).trim();
+    }
+
     console.log();
 
     for (const dir of [
@@ -306,7 +354,11 @@ export async function runNew(rest: string[]) {
 
         'src/types/Context.d.ts': contextDts,
 
-        '.env.api': `NAME=api\nPORT=3000\nMULTI_THREAD=true\n`,
+        '.env.api': buildEnvFileContent('api', dbOption?.driver, {
+            d1Binding: 'DB',
+            d1DatabaseName,
+            d1DatabaseId,
+        }),
 
         'package.json': JSON.stringify({
             name: projectName,
