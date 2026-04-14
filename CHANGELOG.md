@@ -2,6 +2,12 @@
 
 Generated from git tags, commit history, and code-level diffs in this repository.
 
+## v0.6.2: Serverless Build Reliability and Validator Fixes
+- Fixed request validation so empty-object and null request bodies are accepted when appropriate instead of failing unexpectedly.
+- Fixed Cloudflare serverless deployment packaging by ensuring the needed Drizzle ORM dependency path is available during deploy.
+- Fixed serverless build output selection to use the source tree where required so runtime connection loading stays compatible.
+- Improved database configuration resolution so the framework can load config correctly from either source or compiled output during build and deployment.
+
 ## v0.6.1: D1 Support, Cloudflare Deployment, CORS Reliability, and Model Mapping Fixes
 - Added Cloudflare D1 support across migration, connection resolution, database typing, model introspection, and deploy-time binding generation so D1-backed projects can use the full Drizzle-based workflow locally and on Cloudflare.
 - Added Cloudflare D1-specific scaffolding to project creation and connection setup so new D1 projects can capture the remote database name and UUID and write the needed environment variables automatically.
