@@ -303,56 +303,44 @@ async function runCloudflareRemoteD1Migrations(opts: {
     migrationsDir: string;
     connectionName: string;
     databaseName: string;
+    databaseId: string;
+    databaseBinding: string;
     envFileArgs: string[];
 }) {
-    const { cwd, migrationsDir, connectionName, databaseName, envFileArgs } = opts;
+    const { cwd, migrationsDir, connectionName, databaseName, databaseId, databaseBinding, envFileArgs } = opts;
     const [wranglerCmd, wranglerPrefix] = resolveWrangler();
-    const baseArgs = [...wranglerPrefix, 'd1', 'execute', databaseName, '--remote'];
+    const wranglerConfigName = `wrangler.morphis.d1.${connectionName}.toml`;
+    const wranglerConfigPath = path.join(cwd, wranglerConfigName);
+    const relativeMigrationsDir = path.relative(cwd, migrationsDir).split(path.sep).join('/');
 
-    const runQuery = (sql: string): string => tryExec(
-        buildShellCommand(wranglerCmd, [...baseArgs, '--json', '--command', sql, ...envFileArgs]),
-        { throws: true },
+    fs.writeFileSync(
+        wranglerConfigPath,
+        [
+            'name = "morphis-d1-migrate"',
+            `compatibility_date = "${new Date().toISOString().slice(0, 10)}"`,
+            '',
+            '[[d1_databases]]',
+            `binding = "${databaseBinding}"`,
+            `database_name = "${databaseName}"`,
+            `database_id = "${databaseId}"`,
+            `migrations_dir = "${relativeMigrationsDir}"`,
+            '',
+        ].join('\n'),
+        'utf8',
     );
 
-    console.log(chalk.cyan(`\n  [deploy:migrate] Running remote D1 migrations for "${connectionName}" on "${databaseName}" ...\n`));
+    console.log(chalk.cyan(`\n  [deploy:migrate] Applying remote D1 migrations for "${connectionName}" on "${databaseName}" using Wrangler's native migration engine ...\n`));
 
-    runQuery(
-        `CREATE TABLE IF NOT EXISTS migrations (` +
-        `id INTEGER PRIMARY KEY AUTOINCREMENT, ` +
-        `batch INTEGER NOT NULL, ` +
-        `name TEXT NOT NULL UNIQUE, ` +
-        `timestamp TEXT NOT NULL DEFAULT (datetime('now'))` +
-        `)`,
-    );
-
-    const batchRows = extractJsonRows(runQuery('SELECT COALESCE(MAX(batch), 0) AS maxbatch FROM migrations'));
-    const nextBatch = Number(batchRows.find(row => 'maxbatch' in row)?.maxbatch ?? 0) + 1;
-
-    const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
-    let ranCount = 0;
-
-    for (const file of files) {
-        const escapedFile = file.replace(/'/g, "''");
-        const existing = extractJsonRows(runQuery(`SELECT name FROM migrations WHERE name = '${escapedFile}' LIMIT 1`));
-        if (existing.length > 0) {
-            console.log(chalk.gray(`  skip     ${file}`));
-            continue;
-        }
-
-        console.log(chalk.gray(`  migrate  ${file}`));
-        await spawnCmd(wranglerCmd, [...baseArgs, '--file', path.join(migrationsDir, file), ...envFileArgs], cwd);
-        runQuery(
-            `INSERT INTO migrations (batch, name, timestamp) VALUES (` +
-            `${nextBatch}, '${escapedFile}', '${new Date().toISOString().replace(/'/g, "''")}')`,
+    try {
+        await spawnCmd(
+            wranglerCmd,
+            [...wranglerPrefix, 'd1', 'migrations', 'apply', databaseBinding, '--remote', '--config', wranglerConfigName, ...envFileArgs],
+            cwd,
         );
-        ranCount += 1;
+    } finally {
+        if (fs.existsSync(wranglerConfigPath)) fs.unlinkSync(wranglerConfigPath);
     }
 
-    if (ranCount === 0) {
-        console.log(chalk.gray('  Nothing to migrate — all migrations are up to date.'));
-    } else {
-        console.log(chalk.green(`  Batch ${nextBatch} complete — ${ranCount} migration(s) ran.`));
-    }
     console.log();
 }
 
@@ -392,6 +380,11 @@ async function runMigrationsBeforeDeploy(opts: {
             ?? process.env.CLOUDFLARE_D1_DATABASE_ID
             ?? process.env.D1_DATABASE_ID
             ?? '';
+        const resolvedBinding = envValues.CLOUDFLARE_D1_BINDING
+            ?? envValues.D1_BINDING
+            ?? process.env.CLOUDFLARE_D1_BINDING
+            ?? process.env.D1_BINDING
+            ?? 'DB';
 
         if (!resolvedDatabaseName || !resolvedDatabaseId) {
             throw new Error(
@@ -405,6 +398,8 @@ async function runMigrationsBeforeDeploy(opts: {
             migrationsDir,
             connectionName,
             databaseName: resolvedDatabaseName,
+            databaseId: resolvedDatabaseId,
+            databaseBinding: resolvedBinding,
             envFileArgs,
         });
         return;
@@ -655,6 +650,132 @@ async function deployCloudflare(opts: {
     let cfContainersWasAdded = false;
 
     try {
+        const envFilePath = path.join(cwd, envFile);
+        const envValues = readEnvFileValues(envFilePath);
+        const databaseConfigPath = path.join(cwd, 'src', 'config', 'database.ts');
+        const databaseConfigSource = fs.existsSync(databaseConfigPath)
+            ? fs.readFileSync(databaseConfigPath, 'utf8')
+            : '';
+        const usesD1 = /driver\s*:\s*['"]d1['"]/.test(databaseConfigSource);
+
+        const resolvedD1Binding = d1Binding
+            ?? envValues.CLOUDFLARE_D1_BINDING
+            ?? envValues.D1_BINDING
+            ?? process.env.CLOUDFLARE_D1_BINDING
+            ?? process.env.D1_BINDING
+            ?? 'DB';
+        const resolvedD1DatabaseName = d1DatabaseName
+            ?? envValues.CLOUDFLARE_D1_DATABASE_NAME
+            ?? envValues.D1_DATABASE_NAME
+            ?? process.env.CLOUDFLARE_D1_DATABASE_NAME
+            ?? process.env.D1_DATABASE_NAME
+            ?? '';
+        const resolvedD1DatabaseId = d1DatabaseId
+            ?? envValues.CLOUDFLARE_D1_DATABASE_ID
+            ?? envValues.D1_DATABASE_ID
+            ?? process.env.CLOUDFLARE_D1_DATABASE_ID
+            ?? process.env.D1_DATABASE_ID
+            ?? '';
+
+        if (usesD1) {
+            if (!resolvedD1DatabaseName || !resolvedD1DatabaseId) {
+                console.error(chalk.red('\n  [deploy:cloudflare] D1 deployment requires CLOUDFLARE_D1_DATABASE_NAME and CLOUDFLARE_D1_DATABASE_ID.'));
+                console.error(chalk.gray('  Set them in your env file or pass --d1-name and --d1-id.\n'));
+                process.exit(1);
+            }
+
+            console.log(chalk.cyan(`\n  [deploy:cloudflare] D1 driver detected — deploying as a Worker so the D1 binding is available at runtime.\n`));
+
+            fs.writeFileSync(
+                path.join(cwd, workerEntryName),
+                [
+                    `import { DurableObject } from 'cloudflare:workers';`,
+                    ``,
+                    `export class ${className} extends DurableObject {}`,
+                    ``,
+                    `export interface Env {`,
+                    `    ${resolvedD1Binding}: unknown;`,
+                    `    ${bindingName}: DurableObjectNamespace<${className}>;`,
+                    `}`,
+                    ``,
+                    `export default {`,
+                    `    async fetch(request: Request, env: Env): Promise<Response> {`,
+                    `        const globalScope = globalThis as Record<string, any>;`,
+                    `        globalScope.__env = env;`,
+                    `        globalScope.__morphisEnv = env;`,
+                    `        const processRef = (globalScope.process ?? {}) as { env?: Record<string, string> };`,
+                    `        const mergedEnv = { ...(processRef.env ?? {}) };`,
+                    `        for (const [key, value] of Object.entries(env)) {`,
+                    `            if (typeof value === 'string') mergedEnv[key] = value;`,
+                    `        }`,
+                    `        globalScope.process = { ...processRef, env: mergedEnv };`,
+                    `        const [{ default: databases }, { default: router }] = await Promise.all([`,
+                    `            import('./src/config/database'),`,
+                    `            import('./src/routes/${server}'),`,
+                    `        ]);`,
+                    `        globalScope.__morphisDatabases = databases;`,
+                    `        return router.handle(request);`,
+                    `    },`,
+                    `} satisfies ExportedHandler<Env>;`,
+                    ``,
+                ].join('\n'),
+                'utf8',
+            );
+
+            fs.writeFileSync(
+                path.join(cwd, wranglerConfigName),
+                [
+                    `name = "${workerName}"`,
+                    `main = "${workerEntryName}"`,
+                    `compatibility_date = "${date}"`,
+                    `compatibility_flags = ["nodejs_compat"]`,
+                    '',
+                    '[[d1_databases]]',
+                    `binding = "${resolvedD1Binding}"`,
+                    `database_name = "${resolvedD1DatabaseName}"`,
+                    `database_id = "${resolvedD1DatabaseId}"`,
+                    '',
+                    '[[durable_objects.bindings]]',
+                    `name = "${bindingName}"`,
+                    `class_name = "${className}"`,
+                    '',
+                    '[[migrations]]',
+                    'tag = "v1"',
+                    `new_sqlite_classes = ["${className}"]`,
+                    '',
+                ].join('\n'),
+                'utf8',
+            );
+
+            const [wranglerCmd, wranglerPrefix] = resolveWrangler();
+            const whoami = tryExec(`${wranglerCmd} ${[...wranglerPrefix, 'whoami'].join(' ')}`);
+            if (!whoami || whoami.toLowerCase().includes('not authenticated') || whoami.toLowerCase().includes('error')) {
+                console.error(chalk.red('\n  Wrangler is not authenticated with Cloudflare.'));
+                console.error(chalk.gray('  Run Wrangler login and retry.\n'));
+                process.exit(1);
+            }
+
+            const envFileArgs = fs.existsSync(envFilePath) ? ['--env-file', envFile] : [];
+            await new Promise<void>((resolve) => {
+                const proc = spawn(
+                    wranglerCmd,
+                    [...wranglerPrefix, 'deploy', '--config', wranglerConfigName, ...envFileArgs],
+                    { stdio: 'inherit', cwd, shell: process.platform === 'win32' },
+                );
+                proc.on('exit', (code) => {
+                    if (code !== 0) process.exit(code ?? 1);
+                    resolve();
+                });
+                proc.on('error', (err) => {
+                    console.error(chalk.red(`  wrangler deploy failed: ${err.message}`));
+                    process.exit(1);
+                });
+            });
+
+            console.log(chalk.green(`\n  [deploy:cloudflare] Worker deployed with D1 binding: ${chalk.bold(workerName)}\n`));
+            return;
+        }
+
         // Step 0: Ensure @cloudflare/containers is installed in the project
         const pkgPath = path.join(cwd, 'package.json');
         let cfContainersInstalled = false;
@@ -734,33 +855,6 @@ async function deployCloudflare(opts: {
 
         // Step 2: Write a Dockerfile that packages the Bun bundle
         fs.writeFileSync(path.join(cwd, dockerfileName), generateDockerfile(server, { envFile, port }), 'utf8');
-
-        const envFilePath = path.join(cwd, envFile);
-        const envValues = readEnvFileValues(envFilePath);
-        const databaseConfigPath = path.join(cwd, 'src', 'config', 'database.ts');
-        const databaseConfigSource = fs.existsSync(databaseConfigPath)
-            ? fs.readFileSync(databaseConfigPath, 'utf8')
-            : '';
-        const usesD1 = /driver\s*:\s*['"]d1['"]/.test(databaseConfigSource);
-
-        const resolvedD1Binding = d1Binding
-            ?? envValues.CLOUDFLARE_D1_BINDING
-            ?? envValues.D1_BINDING
-            ?? process.env.CLOUDFLARE_D1_BINDING
-            ?? process.env.D1_BINDING
-            ?? 'DB';
-        const resolvedD1DatabaseName = d1DatabaseName
-            ?? envValues.CLOUDFLARE_D1_DATABASE_NAME
-            ?? envValues.D1_DATABASE_NAME
-            ?? process.env.CLOUDFLARE_D1_DATABASE_NAME
-            ?? process.env.D1_DATABASE_NAME
-            ?? '';
-        const resolvedD1DatabaseId = d1DatabaseId
-            ?? envValues.CLOUDFLARE_D1_DATABASE_ID
-            ?? envValues.D1_DATABASE_ID
-            ?? process.env.CLOUDFLARE_D1_DATABASE_ID
-            ?? process.env.D1_DATABASE_ID
-            ?? '';
 
         if (usesD1 && (!resolvedD1DatabaseName || !resolvedD1DatabaseId)) {
             console.log(chalk.yellow(`\n  [deploy:cloudflare] D1 driver detected in src/config/database.ts, but no remote D1 database mapping was provided.`));

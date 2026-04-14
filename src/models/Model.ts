@@ -27,15 +27,26 @@ function pluralize(word: string): string {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function importFromProject(pkg: string): Promise<any> {
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    const dynamicImport = new Function('p', 'return import(p)');
+    const isWorkerRuntime = typeof (globalThis as { WebSocketPair?: unknown }).WebSocketPair !== 'undefined';
+
+    if (isWorkerRuntime) {
+        switch (pkg) {
+            case 'drizzle-orm': return import('drizzle-orm');
+            case 'drizzle-orm/d1': return import('drizzle-orm/d1');
+            case 'drizzle-orm/sqlite-core': return import('drizzle-orm/sqlite-core');
+            case 'drizzle-orm/pg-core': return import('drizzle-orm/pg-core');
+            case 'drizzle-orm/mysql-core': return import('drizzle-orm/mysql-core');
+            default: return import(pkg);
+        }
+    }
+
     let resolved: string;
     try {
         resolved = require.resolve(pkg, { paths: [process.cwd()] });
     } catch {
         resolved = pkg;
     }
-    return dynamicImport(resolved);
+    return import(resolved);
 }
 
 // ── Column introspection helpers ──────────────────────────────────────────────
@@ -698,6 +709,8 @@ export class Model {
     private static _drizzle: any;
     /** @internal Cached driver name. */
     private static _driver: string;
+    /** @internal Last initialization error, if any. */
+    private static _initializationError?: Error;
 
     /**
      * Derive the default table name from the class name (PascalCase → snake_case + plural).
@@ -716,9 +729,10 @@ export class Model {
     static get table(): any {
         const t = this.schema ?? this._table;
         if (!t) {
-            throw new Error(
-                `${this.name}.table is not available. Call ${this.name}.initialize() or bootstrap([${this.name}]) first.`,
-            );
+            const reason = this._initializationError
+                ? ` Initialization failed: ${this._initializationError.message}`
+                : ` Call ${this.name}.initialize() or bootstrap([${this.name}]) first.`;
+            throw new Error(`${this.name}.table is not available.${reason}`);
         }
         return t;
     }
@@ -731,12 +745,15 @@ export class Model {
     static async initialize(): Promise<void> {
         if (booted.has(this)) return;
 
+        this._initializationError = undefined;
+
         const entry: ConnectionEntry = await ConnectionManager.get(this.connection);
         this._drizzle = entry.db;
         this._driver = entry.driver;
 
         if (this.schema) {
             // Schema provided by sync:model — no introspection needed.
+            this._initializationError = undefined;
             booted.add(this);
             return;
         }
@@ -766,15 +783,20 @@ export class Model {
                     columns = await introspectMssql(entry.db, tableName);
                     break;
             }
-        } catch {
-            // Table not yet created — _table stays undefined; queries will fail
-            // at the DB layer with a descriptive error.
+        } catch (err) {
+            this._initializationError = err instanceof Error ? err : new Error(String(err));
+            return;
         }
 
-        if (columns.length > 0) {
-            this._table = await buildDrizzleTable(this._driver, tableName, columns);
+        if (columns.length === 0) {
+            this._initializationError = new Error(
+                `Table "${tableName}" could not be introspected for the "${this._driver}" connection. Check that the database is reachable and the table exists.`,
+            );
+            return;
         }
 
+        this._table = await buildDrizzleTable(this._driver, tableName, columns);
+        this._initializationError = undefined;
         booted.add(this);
     }
 

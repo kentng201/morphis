@@ -29,7 +29,9 @@ function resolveD1Database(conn: any): any {
         ? conn.binding.trim()
         : 'DB';
 
-    const fromGlobal = getGlobalValue(bindingName) ?? getGlobalValue(`__env.${bindingName}`);
+    const fromGlobal = getGlobalValue(bindingName)
+        ?? getGlobalValue(`__env.${bindingName}`)
+        ?? getGlobalValue(`__morphisEnv.${bindingName}`);
     if (fromGlobal && typeof fromGlobal.prepare === 'function') return fromGlobal;
 
     return undefined;
@@ -50,22 +52,50 @@ function resolveDatabaseConfigPath(cwd: string): string {
     return candidates.find(candidate => fs.existsSync(candidate)) ?? candidates[0];
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getInjectedDatabaseConfig(): Record<string, any> | undefined {
+    const injected = getGlobalValue('__morphisDatabases') ?? getGlobalValue('__morphisDatabaseConfig');
+    return injected && typeof injected === 'object'
+        ? injected as Record<string, any>
+        : undefined;
+}
+
+function hasCloudflareD1Hints(): boolean {
+    return Boolean(
+        getGlobalValue('__env')
+        || getGlobalValue('__morphisEnv')
+        || process.env.CLOUDFLARE_D1_DATABASE_ID
+        || process.env.D1_DATABASE_ID,
+    );
+}
+
 /**
  * Resolve a package from the target (consumer) project's node_modules,
- * then dynamically import it. This ensures morphis never ships its own
- * copy of drizzle-orm or any database driver.
+ * then dynamically import it. In Worker runtimes, fall back to direct imports
+ * because string-based code generation is not allowed.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function importFromProject(pkg: string): Promise<any> {
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    const dynamicImport = new Function('p', 'return import(p)');
+    const isWorkerRuntime = typeof (globalThis as { WebSocketPair?: unknown }).WebSocketPair !== 'undefined';
+
+    if (isWorkerRuntime) {
+        switch (pkg) {
+            case 'drizzle-orm': return import('drizzle-orm');
+            case 'drizzle-orm/d1': return import('drizzle-orm/d1');
+            case 'drizzle-orm/sqlite-core': return import('drizzle-orm/sqlite-core');
+            case 'drizzle-orm/pg-core': return import('drizzle-orm/pg-core');
+            case 'drizzle-orm/mysql-core': return import('drizzle-orm/mysql-core');
+            default: return import(pkg);
+        }
+    }
+
     let resolved: string;
     try {
         resolved = require.resolve(pkg, { paths: [process.cwd()] });
     } catch {
         resolved = pkg;
     }
-    return dynamicImport(resolved);
+    return import(resolved);
 }
 
 /**
@@ -83,18 +113,24 @@ export class ConnectionManager {
             return registry.get(connectionName)!;
         }
 
-        const cwd = process.cwd();
-        const configPath = resolveDatabaseConfigPath(cwd);
+        const injectedDatabases = getInjectedDatabaseConfig();
+        let configPath = 'globalThis.__morphisDatabases';
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let databases: Record<string, any>;
-        try {
-            const mod = await import(configPath);
-            databases = mod.default;
-        } catch (err) {
-            throw new Error(
-                `Failed to load database config at ${configPath}: ${err instanceof Error ? err.message : String(err)}`,
-            );
+        if (injectedDatabases) {
+            databases = injectedDatabases;
+        } else {
+            const cwd = process.cwd();
+            configPath = resolveDatabaseConfigPath(cwd);
+            try {
+                const mod = await import(configPath);
+                databases = mod.default;
+            } catch (err) {
+                throw new Error(
+                    `Failed to load database config at ${configPath}: ${err instanceof Error ? err.message : String(err)}`,
+                );
+            }
         }
 
         const entries = Object.entries(databases);
@@ -167,11 +203,21 @@ export class ConnectionManager {
             }
 
             case 'd1': {
+                const bindingName = typeof conn?.binding === 'string' && conn.binding.trim() !== ''
+                    ? conn.binding.trim()
+                    : 'DB';
                 const d1Database = resolveD1Database(conn);
                 if (d1Database) {
                     const drizzleMod = await importFromProject('drizzle-orm/d1');
                     const drizzle = drizzleMod.drizzle;
                     return { db: drizzle(d1Database), driver };
+                }
+
+                if (bindingName && hasCloudflareD1Hints()) {
+                    throw new Error(
+                        `Cloudflare D1 binding "${bindingName}" was not available at runtime. ` +
+                        'Ensure the Worker exposes env bindings before Morphis initializes the connection.',
+                    );
                 }
 
                 if (conn.storage) {

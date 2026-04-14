@@ -6,6 +6,34 @@ import { runInProject } from '../utils/spawnInProject';
 /** Drivers that use plain-SQL migrations */
 const SQL_DRIVERS = new Set(['mysql', 'mariadb', 'postgres', 'mssql', 'sqlite', 'd1']);
 
+export function splitMigrationStatements(sql: string): string[] {
+    return sql
+        .replace(/\r\n/g, '\n')
+        .split(/\n\s*-->\s*statement-breakpoint\s*\n/g)
+        .flatMap(chunk => chunk.split(/;\s*(?=\n|$)/g))
+        .map(statement => statement
+            .split('\n')
+            .filter(line => !/^\s*--/.test(line))
+            .join('\n')
+            .trim())
+        .filter(Boolean);
+}
+
+const splitMigrationStatementsHelper = `
+function splitMigrationStatements(sql) {
+    return sql
+        .replace(/\\r\\n/g, '\\n')
+        .split(/\\n\\s*-->\\s*statement-breakpoint\\s*\\n/g)
+        .flatMap(chunk => chunk.split(/;\\s*(?=\\n|$)/g))
+        .map(statement => statement
+            .split('\\n')
+            .filter(line => !/^\\s*--/.test(line))
+            .join('\\n')
+            .trim())
+        .filter(Boolean);
+}
+`;
+
 export async function runMigrate(rest: string[]) {
     const cwd = process.cwd();
 
@@ -122,6 +150,7 @@ function buildPostgresScript(connectionJson: string, migrationsDirJson: string, 
 import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
+${splitMigrationStatementsHelper}
 
 const client = new pg.Client(${connectionJson});
 try { await client.connect(); } catch (err) {
@@ -152,8 +181,11 @@ if (pending.length === 0) {
     console.log('  Nothing to migrate — all migrations are up to date.');
 } else {
     for (const file of pending) {
-        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
-        if (sql) await client.query(sql);
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+        const statements = splitMigrationStatements(sql);
+        for (const statement of statements) {
+            await client.query(statement);
+        }
         await client.query(
             'INSERT INTO migrations (batch, name, timestamp) VALUES ($1, $2, $3)',
             [nextBatch, file, new Date()]
@@ -172,6 +204,7 @@ function buildMysqlScript(connectionJson: string, migrationsDirJson: string, con
 import mysql from 'mysql2/promise';
 import fs from 'fs';
 import path from 'path';
+${splitMigrationStatementsHelper}
 
 let conn;
 try { conn = await mysql.createConnection(${connectionJson}); } catch (err) {
@@ -202,8 +235,11 @@ if (pending.length === 0) {
     console.log('  Nothing to migrate — all migrations are up to date.');
 } else {
     for (const file of pending) {
-        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
-        if (sql) await conn.execute(sql);
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+        const statements = splitMigrationStatements(sql);
+        for (const statement of statements) {
+            await conn.execute(statement);
+        }
         await conn.execute(
             'INSERT INTO migrations (batch, name, timestamp) VALUES (?, ?, ?)',
             [nextBatch, file, new Date()]
@@ -222,6 +258,7 @@ function buildSqliteScript(connectionJson: string, migrationsDirJson: string, co
 import { Database } from 'bun:sqlite';
 import fs from 'fs';
 import path from 'path';
+${splitMigrationStatementsHelper}
 
 const connOpts = ${connectionJson};
 const db = new Database(connOpts.storage || ':memory:');
@@ -249,8 +286,11 @@ if (pending.length === 0) {
     console.log('  Nothing to migrate — all migrations are up to date.');
 } else {
     for (const file of pending) {
-        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
-        if (sql) db.run(sql);
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+        const statements = splitMigrationStatements(sql);
+        for (const statement of statements) {
+            db.run(statement);
+        }
         db.prepare('INSERT INTO migrations (batch, name, timestamp) VALUES (?, ?, ?)').run(
             nextBatch, file, new Date().toISOString()
         );
@@ -268,6 +308,7 @@ function buildD1Script(connectionJson: string, migrationsDirJson: string, config
 import { Database } from 'bun:sqlite';
 import fs from 'fs';
 import path from 'path';
+${splitMigrationStatementsHelper}
 
 const connOpts = ${connectionJson};
 if (!connOpts.storage) {
@@ -301,8 +342,11 @@ if (pending.length === 0) {
     console.log('  Nothing to migrate — all migrations are up to date.');
 } else {
     for (const file of pending) {
-        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
-        if (sql) db.run(sql);
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+        const statements = splitMigrationStatements(sql);
+        for (const statement of statements) {
+            db.run(statement);
+        }
         db.prepare('INSERT INTO migrations (batch, name, timestamp) VALUES (?, ?, ?)').run(
             nextBatch, file, new Date().toISOString()
         );
@@ -320,6 +364,7 @@ function buildMssqlScript(connectionJson: string, migrationsDirJson: string, con
 import mssql from 'mssql';
 import fs from 'fs';
 import path from 'path';
+${splitMigrationStatementsHelper}
 
 let pool;
 try { pool = await mssql.connect(${connectionJson}); } catch (err) {
@@ -351,8 +396,11 @@ if (pending.length === 0) {
     console.log('  Nothing to migrate — all migrations are up to date.');
 } else {
     for (const file of pending) {
-        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim();
-        if (sql) await pool.request().query(sql);
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+        const statements = splitMigrationStatements(sql);
+        for (const statement of statements) {
+            await pool.request().query(statement);
+        }
         await pool.request()
             .input('batch', mssql.Int, nextBatch)
             .input('name', mssql.NVarChar, file)
