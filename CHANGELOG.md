@@ -2,6 +2,15 @@
 
 Generated from git tags, commit history, and code-level diffs in this repository.
 
+## v0.6.3: Transactions, Transformer Scaffolding, and Serverless Build Alignment
+- Added explicit model transaction support through `ConnectionManager.getTransaction()` and transaction-aware CRUD methods so one transaction can be reused across creates, updates, deletes, queries, and instance methods on the same connection.
+- Added transaction regression coverage across commit, rollback, multi-model reuse, named connections, and connection mismatch protection.
+- Added `morphis new:transformer` so projects can scaffold response transformer classes from the CLI.
+- Improved serverless Docker packaging to run the built `dist/<server>/index.js` bundle directly, verify the generated build output before image creation, and align the container runtime with the compiled server artifact.
+- Improved generated OpenAPI server URLs so `route:list --format=openapi` can derive a usable server URL from `HOST` or fall back to `localhost` when explicit expose variables are absent.
+- Excluded test files from the published package output.
+- Refreshed the GitHub README into a Laravel-style project overview while pointing readers to the live Morphis documentation site.
+
 ## v0.6.2: Serverless Build Reliability and Validator Fixes
 - Fixed request validation so empty-object and null request bodies are accepted when appropriate instead of failing unexpectedly.
 - Fixed Cloudflare serverless deployment packaging by ensuring the needed Drizzle ORM dependency path is available during deploy.
