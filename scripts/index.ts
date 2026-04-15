@@ -47,6 +47,7 @@ const rest = args.slice(1);
 // Referenced so sibling scripts (build.ts, listRoutes.ts) are found by
 // absolute path regardless of the user cwd (important after bun link).
 const scriptsDir = import.meta.dirname;
+const packageJsonPath = path.resolve(scriptsDir, '..', 'package.json');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -87,6 +88,22 @@ function spawnBun(cmdArgs: string[]) {
         console.error(chalk.red(`  Failed to start process: ${err.message}`));
         process.exit(1);
     });
+}
+
+function getCliVersion(): string | null {
+    if (!fs.existsSync(packageJsonPath)) return null;
+
+    try {
+        const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+        return typeof pkg.version === 'string' && pkg.version ? pkg.version : null;
+    } catch {
+        return null;
+    }
+}
+
+function printVersion() {
+    const version = getCliVersion();
+    console.log(version ? chalk.white(`v${version}`) : 'morphis');
 }
 
 function getProject(): string | null {
@@ -385,12 +402,14 @@ const commands: Record<string, CommandDef> = {
 
 function printHelp() {
     const maxLen = Math.max(...Object.keys(commands).map(k => k.length));
+    const version = getCliVersion();
 
     console.log();
-    console.log(chalk.bold.cyan('  morphis') + chalk.gray('  CLI management tool'));
+    console.log(chalk.bold.cyan('  morphis'), version ? chalk.white(`(v${version})`) : '', chalk.gray('CLI management tool'));
     console.log();
     console.log(chalk.bold('  Usage'));
     console.log(chalk.gray('    morphis <command> [options]'));
+    console.log(chalk.gray('    morphis --version'));
     console.log();
     console.log(chalk.bold('  Commands'));
 
@@ -402,6 +421,9 @@ function printHelp() {
 
     console.log(
         '    ' + chalk.green('help'.padEnd(maxLen + 2)) + chalk.white('Show this help message'),
+    );
+    console.log(
+        '    ' + chalk.green('version'.padEnd(maxLen + 2)) + chalk.white('Show the installed Morphis CLI version'),
     );
     console.log();
     console.log(chalk.bold('  Options'));
@@ -452,6 +474,11 @@ function printHelp() {
 
 if (!command || command === 'help' || command === '--help' || command === '-h') {
     printHelp();
+    process.exit(0);
+}
+
+if (command === 'version' || command === '--version' || command === '-v') {
+    printVersion();
     process.exit(0);
 }
 
