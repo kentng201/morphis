@@ -1,1 +1,9 @@
-export { Model, ModelInstance, bootstrap, type QueryOptions } from './Model';
+export {
+    Model,
+    ModelInstance,
+    bootstrap,
+    type ModelTransaction,
+    type QueryOptions,
+    type TransactionOptions,
+    type TransactionOr,
+} from './Model';

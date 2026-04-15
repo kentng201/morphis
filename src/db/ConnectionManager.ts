@@ -1,10 +1,25 @@
 import fs from 'fs';
 import path from 'path';
+import type { DatabaseConfig } from '../types/Database';
 
 export interface ConnectionEntry {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     db: any;
+    connectionName: string;
     driver: string;
+}
+
+export interface TransactionEntry {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db: any;
+    connectionName: string;
+    driver: string;
+    commit(): Promise<void>;
+    rollback(): Promise<void>;
+}
+
+function hasStorageConnection(connection: DatabaseConfig['connection']): connection is Extract<DatabaseConfig, { driver: 'sqlite' | 'd1' }>['connection'] {
+    return typeof (connection as { storage?: unknown }).storage === 'string';
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -103,16 +118,11 @@ async function importFromProject(pkg: string): Promise<any> {
  * Instances are lazily created and cached for the lifetime of the process.
  */
 export class ConnectionManager {
-    /**
-     * Returns the cached Drizzle db instance (wrapped as `ConnectionEntry`)
-     * for the given connection name, creating it on first access by loading
-     * the consuming project's `src/config/database.ts`.
-     */
-    static async get(connectionName: string): Promise<ConnectionEntry> {
-        if (registry.has(connectionName)) {
-            return registry.get(connectionName)!;
-        }
-
+    private static async resolveConfig(connectionName: string): Promise<{
+        config: DatabaseConfig;
+        configPath: string;
+        resolvedConnectionName: string;
+    }> {
         const injectedDatabases = getInjectedDatabaseConfig();
         let configPath = 'globalThis.__morphisDatabases';
 
@@ -138,18 +148,191 @@ export class ConnectionManager {
             throw new Error(`Database config at ${configPath} has no connections configured`);
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const config: any = connectionName === 'default'
-            ? (entries.find(([, d]) => d.isDefault)?.[1] ?? entries[0][1])
-            : databases[connectionName];
+        const resolvedEntry = connectionName === 'default'
+            ? (entries.find(([, d]) => d.isDefault) ?? entries[0])
+            : [connectionName, databases[connectionName]];
+        const [resolvedConnectionName, config] = resolvedEntry;
 
         if (!config) {
             throw new Error(`Connection "${connectionName}" not found in ${configPath}`);
         }
 
-        const entry = await ConnectionManager.createDrizzle(config);
+        return { config, configPath, resolvedConnectionName };
+    }
+
+    /**
+     * Returns the cached Drizzle db instance (wrapped as `ConnectionEntry`)
+     * for the given connection name, creating it on first access by loading
+     * the consuming project's `src/config/database.ts`.
+     */
+    static async get(connectionName: string): Promise<ConnectionEntry> {
+        if (registry.has(connectionName)) {
+            return registry.get(connectionName)!;
+        }
+
+        const { config, resolvedConnectionName } = await ConnectionManager.resolveConfig(connectionName);
+        const entry = await ConnectionManager.createDrizzle(config, resolvedConnectionName);
         registry.set(connectionName, entry);
         return entry;
+    }
+
+    static async getTransaction(connectionName: string = 'default'): Promise<TransactionEntry> {
+        const entry = await ConnectionManager.get(connectionName);
+        const { config } = await ConnectionManager.resolveConfig(connectionName);
+        const conn = config.connection;
+
+        switch (entry.driver) {
+            case 'postgres': {
+                const client = await entry.db.$client.connect();
+                const drizzleMod = await importFromProject('drizzle-orm/node-postgres');
+                const drizzle = drizzleMod.drizzle;
+                await client.query('BEGIN');
+
+                let finished = false;
+                const finalize = async (query: 'COMMIT' | 'ROLLBACK') => {
+                    if (finished) return;
+                    finished = true;
+                    try {
+                        await client.query(query);
+                    } finally {
+                        client.release();
+                    }
+                };
+
+                return {
+                    db: drizzle(client),
+                    connectionName: entry.connectionName,
+                    driver: entry.driver,
+                    commit: () => finalize('COMMIT'),
+                    rollback: () => finalize('ROLLBACK'),
+                };
+            }
+
+            case 'mysql':
+            case 'mariadb': {
+                const pool = entry.db.$client?.pool ?? entry.db.$client;
+                const client = await pool.getConnection();
+                const drizzleMod = await importFromProject('drizzle-orm/mysql2');
+                const drizzle = drizzleMod.drizzle;
+                await client.beginTransaction();
+
+                let finished = false;
+                const release = async () => {
+                    try {
+                        await client.release();
+                    } catch {
+                        // best-effort release
+                    }
+                };
+                const finalize = async (action: 'commit' | 'rollback') => {
+                    if (finished) return;
+                    finished = true;
+                    try {
+                        await client[action]();
+                    } finally {
+                        await release();
+                    }
+                };
+
+                return {
+                    db: drizzle(client),
+                    connectionName: entry.connectionName,
+                    driver: entry.driver,
+                    commit: () => finalize('commit'),
+                    rollback: () => finalize('rollback'),
+                };
+            }
+
+            case 'sqlite': {
+                if (!hasStorageConnection(conn)) {
+                    throw new Error(`SQLite connection "${entry.connectionName}" requires connection.storage.`);
+                }
+                const sqliteMod = await importFromProject('bun:sqlite');
+                const Database = sqliteMod.Database ?? sqliteMod.default;
+                const drizzleMod = await importFromProject('drizzle-orm/bun-sqlite');
+                const drizzle = drizzleMod.drizzle;
+                const database = new Database(conn.storage);
+                database.exec('BEGIN');
+
+                let finished = false;
+                const finalize = async (query: 'COMMIT' | 'ROLLBACK') => {
+                    if (finished) return;
+                    finished = true;
+                    try {
+                        database.exec(query);
+                    } finally {
+                        database.close();
+                    }
+                };
+
+                return {
+                    db: drizzle(database),
+                    connectionName: entry.connectionName,
+                    driver: entry.driver,
+                    commit: () => finalize('COMMIT'),
+                    rollback: () => finalize('ROLLBACK'),
+                };
+            }
+
+            case 'd1': {
+                if (hasStorageConnection(conn) && conn.storage) {
+                    const sqliteMod = await importFromProject('bun:sqlite');
+                    const Database = sqliteMod.Database ?? sqliteMod.default;
+                    const drizzleMod = await importFromProject('drizzle-orm/bun-sqlite');
+                    const drizzle = drizzleMod.drizzle;
+                    const database = new Database(conn.storage);
+                    database.exec('BEGIN');
+
+                    let finished = false;
+                    const finalize = async (query: 'COMMIT' | 'ROLLBACK') => {
+                        if (finished) return;
+                        finished = true;
+                        try {
+                            database.exec(query);
+                        } finally {
+                            database.close();
+                        }
+                    };
+
+                    return {
+                        db: drizzle(database),
+                        connectionName: entry.connectionName,
+                        driver: entry.driver,
+                        commit: () => finalize('COMMIT'),
+                        rollback: () => finalize('ROLLBACK'),
+                    };
+                }
+
+                throw new Error('Explicit transactions are not supported for Cloudflare D1 bindings.');
+            }
+
+            case 'mssql': {
+                const mssqlMod = await importFromProject('mssql');
+                const mssql = mssqlMod.default ?? mssqlMod;
+                const transaction = new mssql.Transaction(entry.db.$client);
+                const drizzleMod = await importFromProject('drizzle-orm/mssql');
+                const drizzle = drizzleMod.drizzle;
+                await transaction.begin();
+
+                let finished = false;
+                const finalize = async (action: 'commit' | 'rollback') => {
+                    if (finished) return;
+                    finished = true;
+                    await transaction[action]();
+                };
+
+                return {
+                    db: drizzle(transaction),
+                    connectionName: entry.connectionName,
+                    driver: entry.driver,
+                    commit: () => finalize('commit'),
+                    rollback: () => finalize('rollback'),
+                };
+            }
+
+            default:
+                throw new Error(`Unsupported database driver: "${entry.driver}"`);
+        }
     }
 
     /**
@@ -157,7 +340,7 @@ export class ConnectionManager {
      * All imports are resolved from the consumer project's node_modules.
      */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    private static async createDrizzle(config: any): Promise<ConnectionEntry> {
+    private static async createDrizzle(config: any, connectionName: string): Promise<ConnectionEntry> {
         const driver: string = config.driver;
         const conn = config.connection;
 
@@ -174,7 +357,7 @@ export class ConnectionManager {
                 });
                 const drizzleMod = await importFromProject('drizzle-orm/node-postgres');
                 const drizzle = drizzleMod.drizzle;
-                return { db: drizzle(pool), driver };
+                return { db: drizzle(pool), connectionName, driver };
             }
 
             case 'mysql':
@@ -190,7 +373,7 @@ export class ConnectionManager {
                 });
                 const drizzleMod = await importFromProject('drizzle-orm/mysql2');
                 const drizzle = drizzleMod.drizzle;
-                return { db: drizzle(pool), driver };
+                return { db: drizzle(pool), connectionName, driver };
             }
 
             case 'sqlite': {
@@ -199,7 +382,7 @@ export class ConnectionManager {
                 const database = new Database(conn.storage);
                 const drizzleMod = await importFromProject('drizzle-orm/bun-sqlite');
                 const drizzle = drizzleMod.drizzle;
-                return { db: drizzle(database), driver };
+                return { db: drizzle(database), connectionName, driver };
             }
 
             case 'd1': {
@@ -210,7 +393,7 @@ export class ConnectionManager {
                 if (d1Database) {
                     const drizzleMod = await importFromProject('drizzle-orm/d1');
                     const drizzle = drizzleMod.drizzle;
-                    return { db: drizzle(d1Database), driver };
+                    return { db: drizzle(d1Database), connectionName, driver };
                 }
 
                 if (bindingName && hasCloudflareD1Hints()) {
@@ -226,7 +409,7 @@ export class ConnectionManager {
                     const database = new Database(conn.storage);
                     const drizzleMod = await importFromProject('drizzle-orm/bun-sqlite');
                     const drizzle = drizzleMod.drizzle;
-                    return { db: drizzle(database), driver };
+                    return { db: drizzle(database), connectionName, driver };
                 }
 
                 throw new Error(
@@ -250,7 +433,7 @@ export class ConnectionManager {
                 }).connect();
                 const drizzleMod = await importFromProject('drizzle-orm/mssql');
                 const drizzle = drizzleMod.drizzle;
-                return { db: drizzle(pool), driver };
+                return { db: drizzle(pool), connectionName, driver };
             }
 
             default:
@@ -260,7 +443,10 @@ export class ConnectionManager {
 
     /** Manually register a pre-built connection entry (useful for testing). */
     static set(connectionName: string, entry: ConnectionEntry): void {
-        registry.set(connectionName, entry);
+        registry.set(connectionName, {
+            ...entry,
+            connectionName: entry.connectionName ?? connectionName,
+        });
     }
 
     /** Remove all cached entries. */

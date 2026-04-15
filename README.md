@@ -141,6 +141,48 @@ import { current } from 'morphis';
 current.userId = 42;  // fully typed
 ```
 
+## 💳 Model Transactions
+
+Morphis supports explicit transactions directly on the model layer, and one transaction can be reused across multiple models on the same connection.
+
+```ts
+import { ConnectionManager } from 'morphis'
+import { AuditLog } from '../models/AuditLog'
+import { Post } from '../models/Post'
+
+const transaction = await ConnectionManager.getTransaction()
+
+try {
+    const created = await Post.create({ content: 'draft' }, transaction)
+    await AuditLog.create(
+        { message: `created post ${created.id}` },
+        { transaction },
+    )
+
+    await Post.update(
+        { content: 'published' },
+        { where: { id: created.id }, transaction },
+    )
+
+    const rows = await Post.findAll({ transaction })
+
+    await transaction.commit()
+    return rows
+} catch (error) {
+    await transaction.rollback()
+    throw error
+}
+```
+
+- Create a transaction with `await ConnectionManager.getTransaction()`.
+- Or target a specific database with `await ConnectionManager.getTransaction('analytics')`.
+- Reuse the same transaction across any models that share the same connection.
+- Pass it directly to methods like `Post.create(data, transaction)`.
+- Or pass it inside options like `Post.findAll({ where: { id: 1 }, transaction })`.
+- Instance methods also support it, such as `await post.update(data, transaction)` and `await post.destroy({ transaction })`.
+- Using a transaction with a model on a different connection throws an error.
+- Explicit transactions are not supported for Cloudflare D1 bindings; local D1 via SQLite storage is supported.
+
 ---
 
 ## ⚖️ Stability & Architecture

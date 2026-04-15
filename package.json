@@ -8,7 +8,9 @@
     },
     "files": [
         "scripts/",
-        "src/"
+        "src/",
+        "!scripts/**/*.test.ts",
+        "!src/**/*.test.ts"
     ],
     "peerDependencies": {
         "drizzle-orm": ">=0.30"

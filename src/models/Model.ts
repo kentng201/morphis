@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { ConnectionManager, type ConnectionEntry } from '../db/ConnectionManager';
+import { ConnectionManager, type ConnectionEntry, type TransactionEntry } from '../db/ConnectionManager';
 import { current } from '../http/Context';
 
 // ── Schema helpers ────────────────────────────────────────────────────────────
@@ -281,6 +281,54 @@ export interface QueryOptions {
     orderBy?: any;
 }
 
+export type ModelTransaction = TransactionEntry;
+
+export interface TransactionOptions {
+    transaction?: ModelTransaction;
+}
+
+type EmptyOptions = Record<never, never>;
+
+type WithTransaction<T extends object> = Omit<T, keyof TransactionOptions> & TransactionOptions;
+
+export type TransactionOr<T extends object> = T | WithTransaction<T> | ModelTransaction;
+
+function isTransaction(value: unknown): value is ModelTransaction {
+    if (!isPlainObject(value)) return false;
+
+    const candidate = value as Record<string, unknown>;
+    return typeof candidate.commit === 'function'
+        && typeof candidate.rollback === 'function'
+        && 'db' in candidate;
+}
+
+function resolveTransactionOptions<T extends object>(value?: TransactionOr<T>): WithTransaction<T> {
+    if (!value || isTransaction(value) || !isPlainObject(value)) {
+        return {} as WithTransaction<T>;
+    }
+
+    return value as WithTransaction<T>;
+}
+
+function resolveTransaction<T extends object>(value?: TransactionOr<T>): ModelTransaction | undefined {
+    if (!value) return undefined;
+    if (isTransaction(value)) return value;
+
+    const transaction = resolveTransactionOptions(value).transaction;
+    return isTransaction(transaction) ? transaction : undefined;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolveExecutor(modelClass: any, transaction?: ModelTransaction): any {
+    if (transaction && modelClass._connectionName && transaction.connectionName !== modelClass._connectionName) {
+        throw new Error(
+            `Transaction for connection "${transaction.connectionName}" cannot be used with ${modelClass.name} on connection "${modelClass._connectionName}".`,
+        );
+    }
+
+    return transaction?.db ?? modelClass._drizzle;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -365,7 +413,14 @@ function withModelTrace<T>(
     const callSite = new Error(`[Morphis Trace] ${modelName}.${methodName}`);
 
     return run().catch((err: unknown) => {
-        const traceFrames = buildModelTraceFrames(callSite.stack, methodName, current.trace ?? []);
+        let activeTrace: string[] = [];
+        try {
+            activeTrace = current.trace ?? [];
+        } catch {
+            activeTrace = [];
+        }
+
+        const traceFrames = buildModelTraceFrames(callSite.stack, methodName, activeTrace);
         const traceBlock = traceFrames.length > 0 ? `\n${traceFrames.join('\n')}` : '';
 
         if (err instanceof Error) {
@@ -614,12 +669,12 @@ export class ModelInstance {
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async update(values: Record<string, any>): Promise<ModelInstance> {
+    async update(values: Record<string, any>, options?: TransactionOr<EmptyOptions>): Promise<ModelInstance> {
         const M = this._modelClass;
         await M.initialize();
         const table = M.table;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const db = (M as any)._drizzle;
+        const transaction = resolveTransaction(options);
+        const db = resolveExecutor(M, transaction);
         const pkCol = findPrimaryKeyColumn(table);
         if (!pkCol) throw new Error('Cannot update: no primary key column found');
 
@@ -634,12 +689,12 @@ export class ModelInstance {
         return this;
     }
 
-    async destroy(): Promise<void> {
+    async destroy(options?: TransactionOr<EmptyOptions>): Promise<void> {
         const M = this._modelClass;
         await M.initialize();
         const table = M.table;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const db = (M as any)._drizzle;
+        const transaction = resolveTransaction(options);
+        const db = resolveExecutor(M, transaction);
         const pkCol = findPrimaryKeyColumn(table);
         if (!pkCol) throw new Error('Cannot destroy: no primary key column found');
 
@@ -707,6 +762,8 @@ export class Model {
     /** @internal Cached Drizzle db instance. */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private static _drizzle: any;
+    /** @internal Resolved connection name backing the cached Drizzle instance. */
+    private static _connectionName: string;
     /** @internal Cached driver name. */
     private static _driver: string;
     /** @internal Last initialization error, if any. */
@@ -749,6 +806,7 @@ export class Model {
 
         const entry: ConnectionEntry = await ConnectionManager.get(this.connection);
         this._drizzle = entry.db;
+        this._connectionName = entry.connectionName;
         this._driver = entry.driver;
 
         if (this.schema) {
@@ -810,36 +868,44 @@ export class Model {
      * const posts = await Post.find().where(eq(Post.table.id, 1)).limit(10);
      */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async find(): Promise<any> {
+    static async find(transactionOr?: TransactionOr<EmptyOptions>): Promise<any> {
         await this.initialize();
-        return this._drizzle.select().from(this.table);
+        const transaction = resolveTransaction(transactionOr);
+        const db = resolveExecutor(this, transaction);
+        return db.select().from(this.table);
     }
 
     // ── Sequelize-like compat methods ────────────────────────────────────────
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async findAll(this: any, options?: QueryOptions): Promise<ModelInstance[]> {
+    static async findAll(this: any, options?: TransactionOr<QueryOptions>): Promise<ModelInstance[]> {
         return withModelTrace(this.name, 'findAll', async () => {
             await this.initialize();
-            let query = this._drizzle.select().from(this.table);
-            const where = await normalizeWhere(this.table, options?.where);
+            const resolvedOptions = resolveTransactionOptions<QueryOptions>(options);
+            const transaction = resolveTransaction(options);
+            const db = resolveExecutor(this, transaction);
+            let query = db.select().from(this.table);
+            const where = await normalizeWhere(this.table, resolvedOptions.where);
             if (where) query = query.where(where);
-            if (options?.orderBy) query = query.orderBy(options.orderBy);
-            if (options?.limit) query = query.limit(options.limit);
-            if (options?.offset) query = query.offset(options.offset);
+            if (resolvedOptions.orderBy) query = query.orderBy(resolvedOptions.orderBy);
+            if (resolvedOptions.limit) query = query.limit(resolvedOptions.limit);
+            if (resolvedOptions.offset) query = query.offset(resolvedOptions.offset);
             const rows = await query;
             return rows.map((r: Record<string, unknown>) => new ModelInstance(this, r));
         });
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async findOne(this: any, options?: QueryOptions): Promise<ModelInstance | null> {
+    static async findOne(this: any, options?: TransactionOr<QueryOptions>): Promise<ModelInstance | null> {
         return withModelTrace(this.name, 'findOne', async () => {
             await this.initialize();
-            let query = this._drizzle.select().from(this.table);
-            const where = await normalizeWhere(this.table, options?.where);
+            const resolvedOptions = resolveTransactionOptions<QueryOptions>(options);
+            const transaction = resolveTransaction(options);
+            const db = resolveExecutor(this, transaction);
+            let query = db.select().from(this.table);
+            const where = await normalizeWhere(this.table, resolvedOptions.where);
             if (where) query = query.where(where);
-            if (options?.orderBy) query = query.orderBy(options.orderBy);
+            if (resolvedOptions.orderBy) query = query.orderBy(resolvedOptions.orderBy);
             query = query.limit(1);
             const rows = await query;
             return rows.length > 0 ? new ModelInstance(this, rows[0]) : null;
@@ -847,7 +913,7 @@ export class Model {
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async findByPk(this: any, id: any, options?: Omit<QueryOptions, 'where'>): Promise<ModelInstance | null> {
+    static async findByPk(this: any, id: any, options?: TransactionOr<Omit<QueryOptions, 'where'>>): Promise<ModelInstance | null> {
         return withModelTrace(this.name, 'findByPk', async () => {
             await this.initialize();
             const pkCol = findPrimaryKeyColumn(this.table);
@@ -855,9 +921,12 @@ export class Model {
 
             const eqMod = await importFromProject('drizzle-orm');
             const eq = eqMod.eq;
+            const resolvedOptions = resolveTransactionOptions<Omit<QueryOptions, 'where'>>(options);
+            const transaction = resolveTransaction(options);
+            const db = resolveExecutor(this, transaction);
 
-            let query = this._drizzle.select().from(this.table).where(eq(pkCol, id));
-            if (options?.orderBy) query = query.orderBy(options.orderBy);
+            let query = db.select().from(this.table).where(eq(pkCol, id));
+            if (resolvedOptions.orderBy) query = query.orderBy(resolvedOptions.orderBy);
             query = query.limit(1);
             const rows = await query;
             return rows.length > 0 ? new ModelInstance(this, rows[0]) : null;
@@ -865,32 +934,39 @@ export class Model {
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async create(this: any, values: Record<string, any>): Promise<ModelInstance> {
+    static async create(this: any, values: Record<string, any>, options?: TransactionOr<EmptyOptions>): Promise<ModelInstance> {
         return withModelTrace(this.name, 'create', async () => {
             await this.initialize();
+            const transaction = resolveTransaction(options);
+            const db = resolveExecutor(this, transaction);
             const normalizedValues = normalizeInputRecord(this.table, values);
-            const result = await this._drizzle.insert(this.table).values(normalizedValues).returning();
+            const result = await db.insert(this.table).values(normalizedValues).returning();
             return new ModelInstance(this, result[0] ?? normalizeOutputRecord(normalizedValues));
         });
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async bulkCreate(this: any, records: Record<string, any>[]): Promise<ModelInstance[]> {
+    static async bulkCreate(this: any, records: Record<string, any>[], options?: TransactionOr<EmptyOptions>): Promise<ModelInstance[]> {
         return withModelTrace(this.name, 'bulkCreate', async () => {
             await this.initialize();
+            const transaction = resolveTransaction(options);
+            const db = resolveExecutor(this, transaction);
             const normalizedRecords = records.map((record: Record<string, any>) => normalizeInputRecord(this.table, record));
-            const result = await this._drizzle.insert(this.table).values(normalizedRecords).returning();
+            const result = await db.insert(this.table).values(normalizedRecords).returning();
             return result.map((r: Record<string, unknown>) => new ModelInstance(this, r));
         });
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async update(this: any, values: Record<string, any>, options: Pick<QueryOptions, 'where'>): Promise<any[]> {
+    static async update(this: any, values: Record<string, any>, options: TransactionOr<Pick<QueryOptions, 'where'>>): Promise<any[]> {
         return withModelTrace(this.name, 'update', async () => {
             await this.initialize();
+            const resolvedOptions = resolveTransactionOptions<Pick<QueryOptions, 'where'>>(options);
+            const transaction = resolveTransaction(options);
+            const db = resolveExecutor(this, transaction);
             const normalizedValues = normalizeInputRecord(this.table, values);
-            let query = this._drizzle.update(this.table).set(normalizedValues);
-            const where = await normalizeWhere(this.table, options?.where);
+            let query = db.update(this.table).set(normalizedValues);
+            const where = await normalizeWhere(this.table, resolvedOptions.where);
             if (where) query = query.where(where);
             const result = await query.returning();
             return result.map((row: Record<string, unknown>) => normalizeOutputRecord(row));
@@ -898,11 +974,14 @@ export class Model {
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async destroy(this: any, options: Pick<QueryOptions, 'where'>): Promise<any[]> {
+    static async destroy(this: any, options: TransactionOr<Pick<QueryOptions, 'where'>>): Promise<any[]> {
         return withModelTrace(this.name, 'destroy', async () => {
             await this.initialize();
-            let query = this._drizzle.delete(this.table);
-            const where = await normalizeWhere(this.table, options?.where);
+            const resolvedOptions = resolveTransactionOptions<Pick<QueryOptions, 'where'>>(options);
+            const transaction = resolveTransaction(options);
+            const db = resolveExecutor(this, transaction);
+            let query = db.delete(this.table);
+            const where = await normalizeWhere(this.table, resolvedOptions.where);
             if (where) query = query.where(where);
             const result = await query.returning();
             return result.map((row: Record<string, unknown>) => normalizeOutputRecord(row));
@@ -910,14 +989,17 @@ export class Model {
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async count(this: any, options?: QueryOptions): Promise<number> {
+    static async count(this: any, options?: TransactionOr<QueryOptions>): Promise<number> {
         return withModelTrace(this.name, 'count', async () => {
             await this.initialize();
             const sqlMod = await importFromProject('drizzle-orm');
             const { sql } = sqlMod;
+            const resolvedOptions = resolveTransactionOptions<QueryOptions>(options);
+            const transaction = resolveTransaction(options);
+            const db = resolveExecutor(this, transaction);
 
-            let query = this._drizzle.select({ count: sql`count(*)` }).from(this.table);
-            const where = await normalizeWhere(this.table, options?.where);
+            let query = db.select({ count: sql`count(*)` }).from(this.table);
+            const where = await normalizeWhere(this.table, resolvedOptions.where);
             if (where) query = query.where(where);
             const rows = await query;
             return Number(rows[0]?.count ?? 0);
@@ -927,24 +1009,33 @@ export class Model {
     static async findAndCountAll(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         this: any,
-        options?: QueryOptions,
+        options?: TransactionOr<QueryOptions>,
     ): Promise<{ count: number; rows: ModelInstance[] }> {
-        const [count, rows] = await Promise.all([
-            this.count(options),
-            this.findAll(options),
-        ]);
+        const transaction = resolveTransaction(options);
+        if (!transaction) {
+            const [count, rows] = await Promise.all([
+                this.count(options),
+                this.findAll(options),
+            ]);
+            return { count, rows };
+        }
+
+        const count = await this.count(options);
+        const rows = await this.findAll(options);
         return { count, rows };
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    static async upsert(this: any, values: Record<string, any>): Promise<ModelInstance> {
+    static async upsert(this: any, values: Record<string, any>, options?: TransactionOr<EmptyOptions>): Promise<ModelInstance> {
         return withModelTrace(this.name, 'upsert', async () => {
             await this.initialize();
             const pkCol = findPrimaryKeyColumn(this.table);
             if (!pkCol) throw new Error('Cannot upsert: no primary key column found');
 
+            const transaction = resolveTransaction(options);
+            const db = resolveExecutor(this, transaction);
             const normalizedValues = normalizeInputRecord(this.table, values);
-            const result = await this._drizzle
+            const result = await db
                 .insert(this.table)
                 .values(normalizedValues)
                 .onConflictDoUpdate({

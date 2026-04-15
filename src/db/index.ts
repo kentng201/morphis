@@ -1,1 +1,1 @@
-export { ConnectionManager, type ConnectionEntry } from './ConnectionManager';
+export { ConnectionManager, type ConnectionEntry, type TransactionEntry } from './ConnectionManager';
