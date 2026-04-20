@@ -139,19 +139,19 @@ interface DrizzleTypeEntry {
 
 /** Registry keyed by importPath so mysql + mariadb share one import. */
 const DRIZZLE_IMPORT_MAP = new Map<string, DrizzleTypeEntry>([
-    ['drizzle-orm/d1',            { importPath: 'drizzle-orm/d1',            typeName: 'DrizzleD1Database', driverLiterals: `'d1'` }],
+    ['drizzle-orm/d1', { importPath: 'drizzle-orm/d1', typeName: 'DrizzleD1Database', driverLiterals: `'d1'` }],
     ['drizzle-orm/node-postgres', { importPath: 'drizzle-orm/node-postgres', typeName: 'NodePgDatabase', driverLiterals: `'postgres'` }],
-    ['drizzle-orm/mysql2',        { importPath: 'drizzle-orm/mysql2',        typeName: 'MySql2Database',  driverLiterals: `'mysql' | 'mariadb'` }],
-    ['drizzle-orm/bun-sqlite',    { importPath: 'drizzle-orm/bun-sqlite',    typeName: 'BunSQLiteDatabase', driverLiterals: `'sqlite'` }],
+    ['drizzle-orm/mysql2', { importPath: 'drizzle-orm/mysql2', typeName: 'MySql2Database', driverLiterals: `'mysql' | 'mariadb'` }],
+    ['drizzle-orm/bun-sqlite', { importPath: 'drizzle-orm/bun-sqlite', typeName: 'BunSQLiteDatabase', driverLiterals: `'sqlite'` }],
     // mssql is a drizzle-orm preview with no stable sub-path; falls back to any
 ]);
 
 const DRIVER_TO_IMPORT_PATH: Partial<Record<DbDriver, string>> = {
-    d1:       'drizzle-orm/d1',
+    d1: 'drizzle-orm/d1',
     postgres: 'drizzle-orm/node-postgres',
-    mysql:    'drizzle-orm/mysql2',
-    mariadb:  'drizzle-orm/mysql2',
-    sqlite:   'drizzle-orm/bun-sqlite',
+    mysql: 'drizzle-orm/mysql2',
+    mariadb: 'drizzle-orm/mysql2',
+    sqlite: 'drizzle-orm/bun-sqlite',
     // mssql intentionally omitted
 };
 
@@ -179,6 +179,8 @@ export function buildDbContextDts(drivers: DbDriver[]): string {
     const branches = entries.map(e => `    C extends { driver: ${e.driverLiterals} } ? ${e.typeName} :`);
 
     return [
+        `export {};`,
+        ``,
         `import type databases from '../config/database';`,
         ...importLines,
         ``,
