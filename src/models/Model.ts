@@ -267,9 +267,81 @@ async function buildColumn(mod: any, driver: string, col: ColumnMeta): Promise<a
 
 // ── Query options ─────────────────────────────────────────────────────────────
 
+/**
+ * Operator-based conditions for a single column in a `where` clause.
+ *
+ * @example
+ * // LIKE
+ * Post.findAll({ where: { title: { like: '%hello%' } } })
+ * // range
+ * Post.findAll({ where: { createdAt: { gte: '2025-01-01', lte: '2025-12-31' } } })
+ * // IN list
+ * Post.findAll({ where: { status: { in: ['draft', 'published'] } } })
+ */
+export interface WhereOperators {
+    /** SQL LIKE pattern, e.g. `'%foo%'` */
+    like?: string;
+    /** Case-insensitive LIKE (ilike), e.g. `'%foo%'` */
+    ilike?: string;
+    /** Negated LIKE */
+    notLike?: string;
+    /** Negated case-insensitive LIKE */
+    notIlike?: string;
+    /** Greater-than */
+    gt?: unknown;
+    /** Greater-than-or-equal */
+    gte?: unknown;
+    /** Less-than */
+    lt?: unknown;
+    /** Less-than-or-equal */
+    lte?: unknown;
+    /** Not-equal */
+    ne?: unknown;
+    /** IN list */
+    in?: unknown[];
+    /** NOT IN list */
+    notIn?: unknown[];
+    /** BETWEEN [min, max] */
+    between?: [unknown, unknown];
+    /** IS NULL */
+    isNull?: true;
+    /** IS NOT NULL */
+    isNotNull?: true;
+}
+
+/**
+ * A recursive where condition that supports column filters, operator objects,
+ * and logical `$and` / `$or` grouping.
+ *
+ * @example
+ * // Simple equality
+ * Post.findAll({ where: { status: 'published' } })
+ *
+ * // AND (default when using multiple keys)
+ * Post.findAll({ where: { type: 'company', status: 'active' } })
+ *
+ * // Explicit OR
+ * Post.findAll({ where: { $or: [{ type: 'personal' }, { type: 'company' }] } })
+ *
+ * // Nested AND + OR
+ * Post.findAll({
+ *   where: {
+ *     $and: [
+ *       { name: { like: '%acme%' } },
+ *       { $or: [{ type: 'personal' }, { type: 'company' }] },
+ *     ],
+ *   },
+ * })
+ */
+export type WhereCondition = {
+    /** Logical AND — all sub-conditions must match */
+    $and?: WhereCondition[];
+    /** Logical OR — at least one sub-condition must match */
+    $or?: WhereCondition[];
+} & Record<string, unknown | WhereOperators>;
+
 export interface QueryOptions {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    where?: any;
+    where?: WhereCondition;
     limit?: number;
     offset?: number;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -380,20 +452,87 @@ function normalizeOutputRecord<T extends Record<string, unknown>>(row: T): T {
     return normalized as T;
 }
 
+const OPERATOR_KEYS = new Set([
+    'like', 'ilike', 'notLike', 'notIlike',
+    'gt', 'gte', 'lt', 'lte', 'ne',
+    'in', 'notIn', 'between',
+    'isNull', 'isNotNull',
+]);
+
+function isOperatorObject(value: unknown): value is Record<string, unknown> {
+    if (!isPlainObject(value)) return false;
+    return Object.keys(value).some(k => OPERATOR_KEYS.has(k));
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function normalizeWhere(table: any, where: unknown): Promise<any> {
     if (!isPlainObject(where)) return where;
 
     const drizzleMod = await importFromProject('drizzle-orm');
-    const { and, eq, isNull } = drizzleMod;
-    const predicates = Object.entries(where).map(([key, value]) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { and, or, eq, isNull, isNotNull, like, ilike, notLike, notIlike, gt, gte, lt, lte, ne, inArray, notInArray, between } = drizzleMod;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const predicates: any[] = [];
+
+    // ── $and / $or logical grouping ──────────────────────────────────────────
+    if ('$and' in where && Array.isArray(where.$and)) {
+        const parts = (await Promise.all(
+            (where.$and as unknown[]).map(c => normalizeWhere(table, c)),
+        )).filter(Boolean);
+        if (parts.length > 0) predicates.push(parts.length === 1 ? parts[0] : and(...parts));
+    }
+
+    if ('$or' in where && Array.isArray(where.$or)) {
+        const parts = (await Promise.all(
+            (where.$or as unknown[]).map(c => normalizeWhere(table, c)),
+        )).filter(Boolean);
+        if (parts.length > 0) predicates.push(parts.length === 1 ? parts[0] : or(...parts));
+    }
+
+    // ── Column conditions ────────────────────────────────────────────────────
+    for (const [key, value] of Object.entries(where)) {
+        if (key === '$and' || key === '$or') continue;
+
         const column = resolveTableColumn(table, key);
         if (!column) {
             throw new Error(`Unknown column "${key}" in where clause`);
         }
 
-        return value === null ? isNull(column) : eq(column, value);
-    });
+        if (value === null) {
+            predicates.push(isNull(column));
+            continue;
+        }
+
+        if (isOperatorObject(value)) {
+            const ops = value as Record<string, unknown>;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const subPredicates: any[] = [];
+            if ('like' in ops) subPredicates.push(like(column, ops.like));
+            if ('ilike' in ops) subPredicates.push(ilike(column, ops.ilike));
+            if ('notLike' in ops) subPredicates.push(notLike(column, ops.notLike));
+            if ('notIlike' in ops) subPredicates.push(notIlike(column, ops.notIlike));
+            if ('gt' in ops) subPredicates.push(gt(column, ops.gt));
+            if ('gte' in ops) subPredicates.push(gte(column, ops.gte));
+            if ('lt' in ops) subPredicates.push(lt(column, ops.lt));
+            if ('lte' in ops) subPredicates.push(lte(column, ops.lte));
+            if ('ne' in ops) subPredicates.push(ne(column, ops.ne));
+            if ('in' in ops && Array.isArray(ops.in)) subPredicates.push(inArray(column, ops.in));
+            if ('notIn' in ops && Array.isArray(ops.notIn)) subPredicates.push(notInArray(column, ops.notIn));
+            if ('between' in ops && Array.isArray(ops.between) && ops.between.length === 2) {
+                subPredicates.push(between(column, ops.between[0], ops.between[1]));
+            }
+            if ('isNull' in ops && ops.isNull === true) subPredicates.push(isNull(column));
+            if ('isNotNull' in ops && ops.isNotNull === true) subPredicates.push(isNotNull(column));
+            if (subPredicates.length === 0) {
+                throw new Error(`Unknown or empty operator object for column "${key}"`);
+            }
+            predicates.push(subPredicates.length === 1 ? subPredicates[0] : and(...subPredicates));
+            continue;
+        }
+
+        predicates.push(eq(column, value));
+    }
 
     if (predicates.length === 0) return undefined;
     if (predicates.length === 1) return predicates[0];
