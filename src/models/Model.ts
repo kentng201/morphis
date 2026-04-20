@@ -27,17 +27,12 @@ function pluralize(word: string): string {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function importFromProject(pkg: string): Promise<any> {
-    const isWorkerRuntime = typeof (globalThis as { WebSocketPair?: unknown }).WebSocketPair !== 'undefined';
-
-    if (isWorkerRuntime) {
-        switch (pkg) {
-            case 'drizzle-orm': return import('drizzle-orm');
-            case 'drizzle-orm/d1': return import('drizzle-orm/d1');
-            case 'drizzle-orm/sqlite-core': return import('drizzle-orm/sqlite-core');
-            case 'drizzle-orm/pg-core': return import('drizzle-orm/pg-core');
-            case 'drizzle-orm/mysql-core': return import('drizzle-orm/mysql-core');
-            default: return import(pkg);
-        }
+    switch (pkg) {
+        case 'drizzle-orm': return import('drizzle-orm');
+        case 'drizzle-orm/d1': return import('drizzle-orm/d1');
+        case 'drizzle-orm/sqlite-core': return import('drizzle-orm/sqlite-core');
+        case 'drizzle-orm/pg-core': return import('drizzle-orm/pg-core');
+        case 'drizzle-orm/mysql-core': return import('drizzle-orm/mysql-core');
     }
 
     let resolved: string;

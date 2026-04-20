@@ -84,6 +84,10 @@ function hasCloudflareD1Hints(): boolean {
     );
 }
 
+function isWorkerRuntime(): boolean {
+    return typeof (globalThis as { WebSocketPair?: unknown }).WebSocketPair !== 'undefined';
+}
+
 /**
  * Resolve a package from the target (consumer) project's node_modules,
  * then dynamically import it. In Worker runtimes, fall back to direct imports
@@ -91,17 +95,14 @@ function hasCloudflareD1Hints(): boolean {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function importFromProject(pkg: string): Promise<any> {
-    const isWorkerRuntime = typeof (globalThis as { WebSocketPair?: unknown }).WebSocketPair !== 'undefined';
-
-    if (isWorkerRuntime) {
-        switch (pkg) {
-            case 'drizzle-orm': return import('drizzle-orm');
-            case 'drizzle-orm/d1': return import('drizzle-orm/d1');
-            case 'drizzle-orm/sqlite-core': return import('drizzle-orm/sqlite-core');
-            case 'drizzle-orm/pg-core': return import('drizzle-orm/pg-core');
-            case 'drizzle-orm/mysql-core': return import('drizzle-orm/mysql-core');
-            default: return import(pkg);
-        }
+    switch (pkg) {
+        case 'drizzle-orm': return import('drizzle-orm');
+        case 'drizzle-orm/d1': return import('drizzle-orm/d1');
+        case 'drizzle-orm/sqlite-core': return import('drizzle-orm/sqlite-core');
+        case 'drizzle-orm/pg-core': return import('drizzle-orm/pg-core');
+        case 'drizzle-orm/mysql-core': return import('drizzle-orm/mysql-core');
+        case 'drizzle-orm/bun-sqlite': return import('drizzle-orm/bun-sqlite');
+        case 'bun:sqlite': return import('bun:sqlite');
     }
 
     let resolved: string;
@@ -390,10 +391,20 @@ export class ConnectionManager {
                     ? conn.binding.trim()
                     : 'DB';
                 const d1Database = resolveD1Database(conn);
+                const workerRuntime = isWorkerRuntime();
                 if (d1Database) {
                     const drizzleMod = await importFromProject('drizzle-orm/d1');
                     const drizzle = drizzleMod.drizzle;
                     return { db: drizzle(d1Database), connectionName, driver };
+                }
+
+                if (!workerRuntime && conn.storage) {
+                    const sqliteMod = await importFromProject('bun:sqlite');
+                    const Database = sqliteMod.Database ?? sqliteMod.default;
+                    const database = new Database(conn.storage);
+                    const drizzleMod = await importFromProject('drizzle-orm/bun-sqlite');
+                    const drizzle = drizzleMod.drizzle;
+                    return { db: drizzle(database), connectionName, driver };
                 }
 
                 if (bindingName && hasCloudflareD1Hints()) {

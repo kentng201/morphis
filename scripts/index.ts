@@ -26,7 +26,7 @@ import { runNewValidator } from './commands/newValidator';
 import { runNewEnv } from './commands/newEnv';
 import { runNewServer } from './commands/newServer';
 import { runKillThread } from './commands/killThread';
-import { runDockerBuild } from './commands/dockerBuild';
+import { printDockerfile, runDockerBuild, runDockerLocal } from './commands/dockerBuild';
 import { runDeploy } from './commands/deploy';
 import { maybeCheckCliUpdate } from './utils/updateCheck';
 import {
@@ -293,10 +293,14 @@ const commands: Record<string, CommandDef> = {
     // ── Build ────────────────────────────────────────────────────────────────
     'build': {
         description: 'Bundle a server for production',
-        usage: 'morphis build --server=<name> [--env=<name>]',
+        usage: 'morphis build --server=<name> [--env=<name>] [--minify] [--obfuscate]',
         run() {
             const target = requireEnvTarget();
-            spawnBun([`--env-file=${target.envFile}`, path.join(scriptsDir, 'commands', 'build.ts'), `--server=${target.server}`]);
+            const extraFlags = [
+                ...(rest.includes('--minify') ? ['--minify'] : []),
+                ...(rest.includes('--obfuscate') ? ['--obfuscate'] : []),
+            ];
+            spawnBun([`--env-file=${target.envFile}`, path.join(scriptsDir, 'commands', 'build.ts'), `--server=${target.server}`, ...extraFlags]);
         },
     },
 
@@ -333,13 +337,54 @@ const commands: Record<string, CommandDef> = {
     // ── Docker image build ────────────────────────────────────────────────────
     'docker:build': {
         description: 'Build a Docker image for a server as a compiled Bun binary',
-        usage: 'morphis docker:build --server=<name> [--env=<name>] [--version=<tag>]',
+        usage: 'morphis docker:build --server=<name> [--env=<name>] [--version=<tag>] [--port=<n>] [--minify] [--obfuscate]',
         async run() {
             const versionArg = rest.find(a => a.startsWith('--version='));
             await runDockerBuild([
-                ...rest.filter(arg => arg.startsWith('--server=') || arg.startsWith('--env=') || arg.startsWith('--env-file=')),
+                ...rest.filter(arg =>
+                    arg.startsWith('--server=')
+                    || arg.startsWith('--env=')
+                    || arg.startsWith('--env-file=')
+                    || arg.startsWith('--port=')
+                    || arg === '--minify'
+                    || arg === '--obfuscate'
+                ),
                 ...(versionArg ? [versionArg] : []),
             ]);
+        },
+    },
+
+    'docker:print': {
+        description: 'Print the generated Dockerfile for a server',
+        usage: 'morphis docker:print --server=<name> [--env=<name>] [--port=<n>] [--minify] [--obfuscate]',
+        run() {
+            printDockerfile(rest.filter(arg =>
+                arg.startsWith('--server=')
+                || arg.startsWith('--env=')
+                || arg.startsWith('--env-file=')
+                || arg.startsWith('--port=')
+                || arg === '--minify'
+                || arg === '--obfuscate'
+            ));
+        },
+    },
+
+    'docker:run': {
+        description: 'Build and run a server locally in Docker using the selected env file',
+        usage: 'morphis docker:run --server=<name> [--env=<name>] [--version=<tag>] [--port=<n>] [--name=<container>] [--detach] [--no-build] [--minify] [--obfuscate]',
+        async run() {
+            await runDockerLocal(rest.filter(arg =>
+                arg.startsWith('--server=')
+                || arg.startsWith('--env=')
+                || arg.startsWith('--env-file=')
+                || arg.startsWith('--version=')
+                || arg.startsWith('--port=')
+                || arg.startsWith('--name=')
+                || arg === '--detach'
+                || arg === '--no-build'
+                || arg === '--minify'
+                || arg === '--obfuscate',
+            ));
         },
     },
 
@@ -364,14 +409,18 @@ const commands: Record<string, CommandDef> = {
     // ── Production server ────────────────────────────────────────────────────
     'start': {
         description: 'Start the built production server',
-        usage: 'morphis start --server=<name> [--env=<name>] [--project=<name>] [--no-build]',
+        usage: 'morphis start --server=<name> [--env=<name>] [--project=<name>] [--no-build] [--minify] [--obfuscate]',
         async run() {
             const target = requireEnvTarget();
             const noBuild = rest.includes('--no-build');
+            const extraBuildFlags = [
+                ...(rest.includes('--minify') ? ['--minify'] : []),
+                ...(rest.includes('--obfuscate') ? ['--obfuscate'] : []),
+            ];
 
             if (!noBuild) {
                 await new Promise<void>((resolve) => {
-                    const buildProc = spawn('bun', [`--env-file=${target.envFile}`, path.join(scriptsDir, 'commands', 'build.ts'), `--server=${target.server}`], {
+                    const buildProc = spawn('bun', [`--env-file=${target.envFile}`, path.join(scriptsDir, 'commands', 'build.ts'), `--server=${target.server}`, ...extraBuildFlags], {
                         stdio: 'inherit',
                         cwd: process.cwd(),
                         shell: process.platform === 'win32',
@@ -456,9 +505,17 @@ function printHelp() {
     console.log(chalk.gray('    morphis route:list      --server=api --format=json'));
     console.log(chalk.gray('    morphis route:list      --server=api --format=openapi --title="NDM API"'));
     console.log(chalk.gray('    morphis build           --server=chat --env=stg'));
+    console.log(chalk.gray('    morphis build           --server=api --minify --obfuscate'));
     console.log(chalk.gray('    morphis dev             --server=mini --env=dev'));
     console.log(chalk.gray('    morphis start           --env-file=.env.dev.api'));
+    console.log(chalk.gray('    morphis start           --server=api --minify --obfuscate'));
     console.log(chalk.gray('    morphis docker:build    --server=api --version=1.0.0'));
+    console.log(chalk.gray('    morphis docker:build    --server=api --version=1.0.0 --minify --obfuscate'));
+    console.log(chalk.gray('    morphis docker:print    --env-file=.env.dev.api'));
+    console.log(chalk.gray('    morphis docker:print    --env-file=.env.dev.api --minify'));
+    console.log(chalk.gray('    morphis docker:run      --server=api --env=dev'));
+    console.log(chalk.gray('    morphis docker:run      --server=api --env=dev --minify --obfuscate'));
+    console.log(chalk.gray('    morphis docker:run      --server=api --env=dev --port=8080 --name=ndm-api'));
     console.log(chalk.gray('    morphis deploy          --server=api --env=dev --target=aws --version=1.0.0 --region=ap-southeast-1'));
     console.log(chalk.gray('    morphis deploy          --server=api --target=gcloud --version=1.0.0 --gcp-project=my-project'));
     console.log(chalk.gray('    morphis deploy          --server=api --target=cloudflare --version=1.0.0'));
