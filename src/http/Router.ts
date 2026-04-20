@@ -255,9 +255,13 @@ export class Router {
             const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
             const action = fn.name.replace(/^bound\s+/, '') || '<anonymous>';
             const mwNames = this.collectMiddlewareNames(middlewares);
+            const inlineDocs = resolveInlineRouteDocs(sourceLocation);
+            const fallbackMeta = resolveRouteKey(fn) as any;
             return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames, action, {
+                controllerName: fallbackMeta?.controllerName,
+                handlerKey: fallbackMeta?.handlerKey,
                 validateMap: this.collectValidateMap(middlewares),
-                docs: resolveInlineRouteDocs(sourceLocation),
+                docs: inlineDocs ?? fallbackMeta?.docs,
             });
         }
         const meta = resolveRouteKey(fn) as any;
