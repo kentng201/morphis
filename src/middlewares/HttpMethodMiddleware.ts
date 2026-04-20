@@ -1,6 +1,8 @@
 import { Middleware } from '../http/Middleware';
 import { HttpMethod, Request, RouteDefinition } from '../http/types';
 import { routeMeta } from '../http/metadata';
+import { methodSourceMeta } from '../http/metadata';
+import { captureDecoratorSourceFile } from '../http/jsdoc';
 
 export function normalizePath(p: string): string {
     const stripped = p.replace(/^\/+|\/+$/g, '');
@@ -25,6 +27,13 @@ export class HttpMethodMiddleware extends Middleware {
         const defs: RouteDefinition[] = routeMeta.get(ctor) ?? [];
         defs.push({ method: this.method, path: this.path, handlerKey: String(propertyKey) });
         routeMeta.set(ctor, defs);
+
+        const sourceFile = captureDecoratorSourceFile();
+        if (sourceFile) {
+            const files = methodSourceMeta.get(ctor) ?? new Map<string, string>();
+            files.set(String(propertyKey), sourceFile);
+            methodSourceMeta.set(ctor, files);
+        }
     }
 
     async handler(req: Request, next: (req: Request) => Promise<unknown>): Promise<unknown> {

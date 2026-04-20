@@ -3,8 +3,14 @@ import { RouteDefinition } from './types';
 /** Stores the normalized base path for each @Controller class */
 export const controllerMeta = new Map<Function, string>();
 
+/** Stores the source file path for each @Controller class. */
+export const controllerSourceMeta = new Map<Function, string>();
+
 /** Stores the list of route definitions for each @Controller class */
 export const routeMeta = new Map<Function, RouteDefinition[]>();
+
+/** Stores the source file path for each controller method decorator application. */
+export const methodSourceMeta = new Map<Function, Map<string, string>>();
 
 /**
  * Symbol stamped onto each handler function (on the prototype) by @Controller

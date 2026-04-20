@@ -10,6 +10,8 @@ export interface OpenApiBuildOptions {
 
 type OpenApiSchema = Record<string, unknown>;
 
+type MediaContentMap = Record<string, Record<string, unknown>>;
+
 function normalizeServerUrl(url: string): string {
     return url.replace(/\/+$/, '');
 }
@@ -195,9 +197,27 @@ function fieldByName(fields: ValidationFieldMetadata[]): Map<string, ValidationF
     return new Map(fields.map(field => [field.path, field]));
 }
 
+function buildMediaContentWithExamples(
+    base: MediaContentMap,
+    examples?: Record<string, unknown>,
+): MediaContentMap | undefined {
+    const content: MediaContentMap = { ...base };
+
+    for (const [mediaType, example] of Object.entries(examples ?? {})) {
+        const entry = content[mediaType] ?? {};
+        content[mediaType] = {
+            ...entry,
+            ...(example !== undefined ? { example } : {}),
+        };
+    }
+
+    return Object.keys(content).length > 0 ? content : undefined;
+}
+
 export function buildOpenApiDocument(server: string, routes: RouteSpec[], options: OpenApiBuildOptions = {}) {
     const paths: Record<string, Record<string, Record<string, unknown>>> = {};
     const servers = resolveServerUrls(options);
+    const tagDescriptions = new Map<string, string>();
 
     for (const route of routes) {
         const openApiPath = toOpenApiPath(route.path);
@@ -213,6 +233,7 @@ export function buildOpenApiDocument(server: string, routes: RouteSpec[], option
                 in: 'path',
                 required: true,
                 schema: field ? fieldToSchema(field) : { type: 'string' },
+                ...(route.docs?.params?.[paramName] ? { description: route.docs.params[paramName] } : {}),
             });
         }
 
@@ -222,6 +243,7 @@ export function buildOpenApiDocument(server: string, routes: RouteSpec[], option
                 in: 'query',
                 required: field.required && !field.optional && !field.nullish,
                 schema: fieldToSchema(field),
+                ...(route.docs?.params?.[field.path] ? { description: route.docs.params[field.path] } : {}),
             });
         }
 
@@ -231,35 +253,98 @@ export function buildOpenApiDocument(server: string, routes: RouteSpec[], option
                 in: 'header',
                 required: field.required && !field.optional && !field.nullish,
                 schema: fieldToSchema(field),
+                ...(route.docs?.params?.[field.path] ? { description: route.docs.params[field.path] } : {}),
             });
+        }
+
+        const operationTags = route.docs?.tags?.length
+            ? route.docs.tags
+            : route.controllerName ? [route.controllerName.replace(/Controller$/, '')] : [server];
+
+        if (route.docs?.controllerDescription) {
+            if (route.docs.tags?.length) {
+                for (const tag of route.docs.tags) {
+                    tagDescriptions.set(tag, route.docs.controllerDescription);
+                }
+            } else if (route.controllerName) {
+                const defaultTag = route.controllerName.replace(/Controller$/, '');
+                tagDescriptions.set(defaultTag, route.docs.controllerDescription);
+            }
+        }
+
+        const responseDescriptions = route.docs?.responses ?? {};
+        const responseExamples = route.docs?.responseExamples ?? {};
+        const responses: Record<string, unknown> = {
+            200: {
+                description: responseDescriptions['200'] ?? 'Successful response',
+                ...(buildMediaContentWithExamples({}, responseExamples['200'])
+                    ? { content: buildMediaContentWithExamples({}, responseExamples['200']) }
+                    : {}),
+            },
+        };
+
+        for (const [statusCode, description] of Object.entries(responseDescriptions)) {
+            if (statusCode === '200') continue;
+            responses[statusCode] = {
+                description,
+                ...(buildMediaContentWithExamples({}, responseExamples[statusCode])
+                    ? { content: buildMediaContentWithExamples({}, responseExamples[statusCode]) }
+                    : {}),
+            };
+        }
+
+        for (const [statusCode, examples] of Object.entries(responseExamples)) {
+            const response = responses[statusCode] as Record<string, unknown> | undefined;
+            if (response) {
+                const existingContent = response.content as MediaContentMap | undefined;
+                const merged = buildMediaContentWithExamples(existingContent ?? {}, examples);
+                if (merged) response.content = merged;
+                continue;
+            }
+
+            responses[statusCode] = {
+                description: responseDescriptions[statusCode] ?? 'Response example',
+                ...(buildMediaContentWithExamples({}, examples)
+                    ? { content: buildMediaContentWithExamples({}, examples) }
+                    : {}),
+            };
         }
 
         const operation: Record<string, unknown> = {
             operationId: route.action,
-            tags: route.controllerName ? [route.controllerName.replace(/Controller$/, '')] : [server],
-            responses: {
-                200: {
-                    description: 'Successful response',
-                },
-            },
+            tags: operationTags,
+            responses,
             'x-morphis-middlewares': {
                 global: route.globalMiddlewares,
                 route: route.middlewares,
             },
         };
 
+        if (route.docs?.summary) operation.summary = route.docs.summary;
+        if (route.docs?.description) operation.description = route.docs.description;
+        if (route.docs?.deprecated) operation.deprecated = true;
+
         if (parameters.length > 0) {
             operation.parameters = parameters;
         }
 
         if (route.validation.body?.fields?.length) {
+            const requestContent = buildMediaContentWithExamples({
+                'application/json': {
+                    schema: fieldsToObjectSchema(route.validation.body.fields),
+                },
+            }, route.docs?.requestExamples);
+
             operation.requestBody = {
                 required: route.validation.body.fields.some(field => field.required && !field.optional && !field.nullish),
-                content: {
-                    'application/json': {
-                        schema: fieldsToObjectSchema(route.validation.body.fields),
-                    },
-                },
+                ...(route.docs?.requestBodyDescription ? { description: route.docs.requestBodyDescription } : {}),
+                ...(requestContent ? { content: requestContent } : {}),
+            };
+        } else if (route.docs?.requestExamples && Object.keys(route.docs.requestExamples).length > 0) {
+            const requestContent = buildMediaContentWithExamples({}, route.docs.requestExamples);
+            operation.requestBody = {
+                ...(route.docs?.requestBodyDescription ? { description: route.docs.requestBodyDescription } : {}),
+                ...(requestContent ? { content: requestContent } : {}),
             };
         }
 
@@ -292,6 +377,11 @@ export function buildOpenApiDocument(server: string, routes: RouteSpec[], option
             ...(options.description ? { description: options.description } : {}),
         },
         ...(servers.length > 0 ? { servers } : {}),
+        ...(tagDescriptions.size > 0
+            ? {
+                tags: [...tagDescriptions.entries()].map(([name, description]) => ({ name, description })),
+            }
+            : {}),
         paths,
     };
 }

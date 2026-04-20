@@ -3,21 +3,22 @@ export { Middleware } from './Middleware';
 export { Trace, withTrace } from './Trace';
 export { Transformer } from './Transformer';
 export { Context, current, runWithContext, setContextFactory, useContext } from './Context';
-export { Validator, inspectValidator, inspectValidateMap } from './Validator';
+export { Validator, inspectValidator, inspectValidateMap, SimpleRules } from './Validator';
 export { buildOpenApiDocument } from './openapi';
+export type { RouteDocs } from './types';
 export type { EndpointMiddleware } from './decorators';
 export type {
-	Request,
-	RawRequest,
-	RouteDefinition,
-	HttpMethod,
-	ValidateMap,
-	TransformMap,
-	RouteSpec,
-	ValidationCriterion,
-	ValidationFieldMetadata,
-	ValidationSource,
-	ValidationSourceMetadata,
+    Request,
+    RawRequest,
+    RouteDefinition,
+    HttpMethod,
+    ValidateMap,
+    TransformMap,
+    RouteSpec,
+    ValidationCriterion,
+    ValidationFieldMetadata,
+    ValidationSource,
+    ValidationSourceMetadata,
 } from './types';
 export type { ValidationRule, ValidationResult, SimpleValidationRuleMap } from './Validator';
 export type { OpenApiBuildOptions } from './openapi';

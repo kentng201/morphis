@@ -1,7 +1,8 @@
 import { Middleware } from '../http/Middleware';
 import { Request, RouteDefinition } from '../http/types';
-import { controllerMeta, routeMeta, ROUTE_KEY, VALIDATE_KEY } from '../http/metadata';
+import { controllerMeta, controllerSourceMeta, methodSourceMeta, routeMeta, ROUTE_KEY, VALIDATE_KEY } from '../http/metadata';
 import { normalizePath } from './HttpMethodMiddleware';
+import { captureDecoratorSourceFile, resolveRouteDocs } from '../http/jsdoc';
 
 export class ControllerMiddleware extends Middleware {
     readonly _kind = 'controller' as const;
@@ -17,6 +18,8 @@ export class ControllerMiddleware extends Middleware {
     protected __apply__(target: Function): void {
         const basePath = this.path;
         controllerMeta.set(target, basePath);
+        const sourceFile = captureDecoratorSourceFile();
+        if (sourceFile) controllerSourceMeta.set(target, sourceFile);
 
         const defs: RouteDefinition[] = routeMeta.get(target) ?? [];
         for (const def of defs) {
@@ -25,11 +28,14 @@ export class ControllerMiddleware extends Middleware {
             const proto = (target as any).prototype;
             const fn = proto[def.handlerKey];
             if (typeof fn === 'function') {
+                const resolvedSourceFile = methodSourceMeta.get(target)?.get(def.handlerKey)
+                    ?? controllerSourceMeta.get(target);
                 const routeKeyValue = {
                     method: def.method,
                     path: fullPath,
                     handlerKey: def.handlerKey,
                     controllerName: (target as any).name,
+                    docs: resolveRouteDocs(resolvedSourceFile, (target as any).name, def.handlerKey),
                 };
                 (fn as any)[ROUTE_KEY] = routeKeyValue;
                 Object.defineProperty(proto, def.handlerKey, {

@@ -43,6 +43,20 @@ export interface ValidationSourceMetadata {
     fields: ValidationFieldMetadata[];
 }
 
+export interface RouteDocs {
+    summary?: string;
+    description?: string;
+    deprecated?: boolean;
+    tags?: string[];
+    params?: Record<string, string>;
+    requestBodyDescription?: string;
+    responses?: Record<string, string>;
+    requestExamples?: Record<string, unknown>;
+    responseExamples?: Record<string, Record<string, unknown>>;
+    controllerSummary?: string;
+    controllerDescription?: string;
+}
+
 export interface RouteSpec {
     method: HttpMethod;
     path: string;
@@ -54,6 +68,7 @@ export interface RouteSpec {
     controllerName?: string;
     handlerKey?: string;
     validation: Partial<Record<ValidationSource, ValidationSourceMetadata>>;
+    docs?: RouteDocs;
 }
 
 /** The native Web/Bun Request class — use `req.raw` to access it. */

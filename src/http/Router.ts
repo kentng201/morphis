@@ -1,4 +1,4 @@
-import { HttpMethod, Request, RawRequest, RouteSpec, ValidateMap } from './types';
+import { HttpMethod, Request, RawRequest, RouteDocs, RouteSpec, ValidateMap } from './types';
 import { HttpMethodMiddleware, ValidateMiddleware, EndpointMiddleware } from './decorators';
 import { TransformerMiddleware } from '../middlewares/TransformerMiddleware';
 import { ConnectMiddleware } from '../middlewares/ConnectMiddleware';
@@ -7,6 +7,7 @@ import { Middleware } from './Middleware';
 import { current, runWithContext } from './Context';
 import { ROUTE_KEY, VALIDATE_KEY } from './metadata';
 import { inspectValidateMap } from './Validator';
+import { captureSourceLocation, resolveInlineRouteDocs } from './jsdoc';
 import {
     createErrorResponse,
     defaultErrorFormatter,
@@ -26,6 +27,7 @@ interface RouteEntry {
     controllerName?: string;
     handlerKey?: string;
     validateMap?: ValidateMap;
+    docs?: RouteDocs;
 }
 
 /** Map from resource method name → HTTP verb + path suffix */
@@ -97,6 +99,7 @@ export class Router {
             controllerName?: string;
             handlerKey?: string;
             validateMap?: ValidateMap;
+            docs?: RouteDocs;
         } = {},
     ): this {
         const { pattern, paramNames } = buildPattern(path);
@@ -112,6 +115,7 @@ export class Router {
             controllerName: options.controllerName,
             handlerKey: options.handlerKey,
             validateMap: options.validateMap,
+            docs: options.docs,
         });
         return this;
     }
@@ -140,6 +144,7 @@ export class Router {
             controllerName: route.controllerName,
             handlerKey: route.handlerKey,
             validation: await inspectValidateMap(route.validateMap),
+            docs: route.docs,
         })));
     }
 
@@ -220,6 +225,7 @@ export class Router {
     endpoint(handler: (req: Request) => unknown, middlewares: EndpointMiddleware[]): this {
         const methodMw = middlewares.find((m): m is HttpMethodMiddleware => (m as any)._kind === 'method');
         if (!methodMw) return this;
+        const sourceLocation = captureSourceLocation();
         const connectWrapped = this.applyConnectMiddlewares(handler, middlewares);
         const transformWrapped = this.applyTransformMiddlewares(connectWrapped, middlewares);
         const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
@@ -227,6 +233,7 @@ export class Router {
         const mwNames = this.collectMiddlewareNames(middlewares);
         return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames, action, {
             validateMap: this.collectValidateMap(middlewares),
+            docs: resolveInlineRouteDocs(sourceLocation),
         });
     }
 
@@ -242,6 +249,7 @@ export class Router {
             // Path and method come from the HttpMethodMiddleware inside the array
             const methodMw = middlewares.find((m): m is HttpMethodMiddleware => (m as any)._kind === 'method');
             if (!methodMw) return this;
+            const sourceLocation = captureSourceLocation();
             const connectWrapped = this.applyConnectMiddlewares(fn, middlewares);
             const transformWrapped = this.applyTransformMiddlewares(connectWrapped, middlewares);
             const wrapped = this.applyValidateMiddlewares(transformWrapped, middlewares);
@@ -249,6 +257,7 @@ export class Router {
             const mwNames = this.collectMiddlewareNames(middlewares);
             return this.addRoute(methodMw.method, methodMw.path, wrapped, action, mwNames, action, {
                 validateMap: this.collectValidateMap(middlewares),
+                docs: resolveInlineRouteDocs(sourceLocation),
             });
         }
         const meta = resolveRouteKey(fn) as any;
@@ -266,6 +275,7 @@ export class Router {
             controllerName: meta.controllerName,
             handlerKey: meta.handlerKey,
             validateMap: resolveValidateMap(fn),
+            docs: meta.docs,
         });
     }
 
@@ -297,6 +307,7 @@ export class Router {
                 controllerName,
                 handlerKey: name,
                 validateMap: resolveValidateMap(fn),
+                docs: (meta as any).docs,
             });
         }
         return this;
@@ -343,7 +354,7 @@ export class Router {
                     params[name] = decodeURIComponent(match[i + 1]);
                 });
 
-                const parsedBody = ['POST', 'PUT', 'PATCH'].includes(method)
+                const parsedBody = this.shouldParseJsonBody(rawReq, method)
                     ? await rawReq.json().catch(() => undefined)
                     : undefined;
 
@@ -414,6 +425,15 @@ export class Router {
             : Response.json(result, { status: defaultStatus });
 
         return this.applyGlobalResponseMiddlewares(request, response);
+    }
+
+    private shouldParseJsonBody(rawReq: RawRequest, method: HttpMethod): boolean {
+        if (!['POST', 'PUT', 'PATCH'].includes(method)) return false;
+
+        const contentType = rawReq.headers.get('content-type')?.toLowerCase() ?? '';
+        if (!contentType) return true;
+
+        return contentType.includes('application/json') || contentType.includes('+json');
     }
 
     private async serializeError(error: unknown, request: Request): Promise<Response> {
