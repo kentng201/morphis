@@ -332,15 +332,13 @@ const commands: Record<string, CommandDef> = {
 
     // ── Docker image build ────────────────────────────────────────────────────
     'docker:build': {
-        description: 'Build a Docker image for a server (runs morphis build first)',
-        usage: 'morphis docker:build --server=<name> [--env=<name>] [--version=<tag>] [--no-build]',
+        description: 'Build a Docker image for a server as a compiled Bun binary',
+        usage: 'morphis docker:build --server=<name> [--env=<name>] [--version=<tag>]',
         async run() {
             const versionArg = rest.find(a => a.startsWith('--version='));
-            const noBuild = rest.includes('--no-build');
             await runDockerBuild([
                 ...rest.filter(arg => arg.startsWith('--server=') || arg.startsWith('--env=') || arg.startsWith('--env-file=')),
                 ...(versionArg ? [versionArg] : []),
-                ...(noBuild ? ['--no-build'] : []),
             ]);
         },
     },
