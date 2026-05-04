@@ -36,38 +36,28 @@ if (!(await file.exists())) {
     process.exit(1);
 }
 
-// Write a temporary entry that wraps the route with Bun.serve().
-// This means users only maintain their route file — no boilerplate entry files needed.
-const tempEntry = `./src/routes/__entry_${server}.ts`;
-await Bun.write(
-    tempEntry,
-    `${hasDatabaseConfig
-        ? `const [{ default: databases }, { default: router }] = await Promise.all([
-    import('../config/database'),
-    import('./${server}'),
-]);
+// Patch src/index.ts for static bundling: remove arg parsing and resolve the dynamic import.
+const tempEntry = `./src/__entry_${server}.ts`;
+const indexContent = await Bun.file('./src/index.ts').text();
+let entryContent = indexContent
+    // Remove serverArg parsing line
+    .replace(/^const serverArg\s*=.*\r?\n/m, '')
+    // Remove server variable line
+    .replace(/^const server\s*=.*\r?\n/m, '')
+    // Replace dynamic import template literal with static import for the known server
+    .replace(/import\(`\.\/routes\/\$\{server\}`\)/g, `import('./routes/${server}')`);
+
+if (hasDatabaseConfig) {
+    const dbSetup = `const { default: databases } = await import('./config/database');
 const globalScope = globalThis as Record<string, unknown>;
 globalScope.__morphisDatabases = databases;
 globalScope.__morphisDatabaseConfig = databases;
 
-function applyMorphisDatabases() {
-    globalScope.__morphisDatabases = databases;
-    globalScope.__morphisDatabaseConfig = databases;
+`;
+    entryContent = entryContent.replace(/(const \{ default: router \})/, `${dbSetup}$1`);
 }
-`
-        : `const { default: router } = await import('./${server}');
-`}
-const port = Number(process.env.PORT ?? 3000);
-Bun.serve({
-    port,
-    reusePort: process.env.MULTI_THREAD === 'true',
-    fetch(request) {
-${hasDatabaseConfig ? '        applyMorphisDatabases();\n' : ''}        return router.handle(request);
-    },
-});
-console.log(\`Service running on http://localhost:\${port}\`);
-`,
-);
+
+await Bun.write(tempEntry, entryContent);
 
 console.log(`[build] Building "${server}" service from ${routesFile} ...`);
 
