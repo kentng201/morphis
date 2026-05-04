@@ -344,11 +344,17 @@ export async function runNew(rest: string[]) {
         'src/index.ts': indexTs,
 
         'src/routes/api.ts': [
-            `import { Get, Router } from 'morphis';`,
+            `import { Cors, Get, Router } from 'morphis';`,
             ``,
             `const router = new Router();`,
             ``,
             `router.get(() => ({ message: 'OK' }), [Get('/')]);`,
+            ``,
+            `router.use([`,
+            `    Cors({`,
+            `        origins: '*',`,
+            `    }),`,
+            `]);`,
             ``,
             `export default router;`,
             ``,

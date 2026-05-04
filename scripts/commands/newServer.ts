@@ -73,11 +73,17 @@ export function runNewServer(rest: string[]) {
     fs.writeFileSync(
         routesFile,
         [
-            `import { Get, Router } from 'morphis';`,
+            `import { Cors, Get, Router } from 'morphis';`,
             ``,
             `const router = new Router();`,
             ``,
             `router.get(() => ({ message: 'OK' }), [Get('/')]);`,
+            ``,
+            `router.use([`,
+            `    Cors({`,
+            `        origins: '*',`,
+            `    }),`,
+            `]);`,
             ``,
             `export default router;`,
             ``,
